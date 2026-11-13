@@ -227,6 +227,9 @@ namespace PlsqlDevAgent.Agent
         public QueryResult GetResultGrid(int maxRows) => _inner.GetResultGrid(maxRows);
         public ExecResult Execute(string sql) => _inner.Execute(sql);
         public bool IsExecutingSql => _inner.IsExecutingSql;
+        public string PendingTransaction => _inner.PendingTransaction;
+        public event Action TransactionChanged { add => _inner.TransactionChanged += value; remove => _inner.TransactionChanged -= value; }
+        public bool UsesOwnSession => _inner.UsesOwnSession;
         public void RefreshObject(string objectType, string owner, string name, int action) => _inner.RefreshObject(objectType, owner, name, action);
         public void ShowDifferences(string caption1, string text1, string caption2, string text2) => _inner.ShowDifferences(caption1, text1, caption2, text2);
         public void SetStatus(string message) => _inner.SetStatus(message);

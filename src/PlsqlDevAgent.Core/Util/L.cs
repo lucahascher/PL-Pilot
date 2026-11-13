@@ -37,6 +37,19 @@ namespace PlsqlDevAgent.Util
         {
             // agent run
             ["Stopped."] = "Gestoppt.",
+            // uncommitted changes of the agent's session
+            ["Stop the agent before committing or rolling back."] = "Stoppen Sie den Agent vor Commit oder Rollback.",
+            ["The agent uses the main session of PL/SQL Developer: commit or roll back there."] = "Der Agent nutzt die Hauptsitzung von PL/SQL Developer: Commit oder Rollback bitte dort.",
+            ["Committed the changes of the agent."] = "Änderungen des Agents festgeschrieben (Commit).",
+            ["Rolled back the changes of the agent."] = "Änderungen des Agents verworfen (Rollback).",
+            ["The connection changed while the agent session had uncommitted changes ({0}). PL/SQL Developer has closed that session: check whether they were saved."] =
+                "Die Verbindung wurde gewechselt, während die Sitzung des Agents nicht festgeschriebene Änderungen hatte ({0}). PL/SQL Developer hat diese Sitzung geschlossen: Bitte prüfen, ob sie gespeichert wurden.",
+            ["The database session of PL/Pilot has uncommitted changes:\n\n{0}\n\nCommit them?\nYes = Commit, No = Rollback, Cancel = do not close PL/SQL Developer"] =
+                "Die Datenbanksitzung von PL/Pilot hat nicht festgeschriebene Änderungen:\n\n{0}\n\nFestschreiben?\nJa = Commit, Nein = Rollback, Abbrechen = PL/SQL Developer nicht schließen",
+            ["(open transaction)"] = "(offene Transaktion)",
+            ["Roll back the data changes of: {0}"] = "Datenänderungen zurücknehmen: {0}",
+            ["the same transaction contains later changes that are not part of this rewind (e.g. from another chat)"] = "dieselbe Transaktion enthält spätere Änderungen, die nicht zurückgespult werden (z. B. aus einem anderen Chat)",
+            ["already committed (by a COMMIT or a DDL statement afterwards)"] = "bereits festgeschrieben (durch ein späteres COMMIT oder eine DDL-Anweisung)",
             // HTTPS
             ["The HTTPS certificate of {0} is not accepted: {1}"] = "Das HTTPS-Zertifikat von {0} wird nicht akzeptiert: {1}",
             ["Could not establish a secure (TLS) connection to {0}. The server may require a TLS version or cipher that Windows on this PC does not offer. ({1})"] =

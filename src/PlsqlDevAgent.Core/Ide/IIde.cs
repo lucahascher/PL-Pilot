@@ -39,6 +39,21 @@ namespace PlsqlDevAgent.Ide
         /// (it cannot be interrupted); the agent's next database call waits for it.
         /// </summary>
         bool IsExecutingSql { get; }
+
+        /// <summary>
+        /// Id of the open transaction in the agent's database session (uncommitted changes), null if there is none.
+        /// Checked after every statement the agent executes.
+        /// </summary>
+        string PendingTransaction { get; }
+
+        /// <summary>Raised (on any thread) when <see cref="PendingTransaction"/> changes.</summary>
+        event Action TransactionChanged;
+
+        /// <summary>
+        /// The agent works in its own database session. False: it shares PL/SQL Developer's main session, so a
+        /// commit or rollback there would also affect the user's own changes.
+        /// </summary>
+        bool UsesOwnSession { get; }
         void RefreshObject(string objectType, string owner, string name, int action);
 
         void ShowDifferences(string caption1, string text1, string caption2, string text2);

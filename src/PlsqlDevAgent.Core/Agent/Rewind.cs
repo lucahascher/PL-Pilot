@@ -13,7 +13,8 @@ namespace PlsqlDevAgent.Agent
     /// <summary>One change the agent (or an Insert button in the chat) made, with what is needed to undo it.</summary>
     public sealed class ChangeRecord
     {
-        public const string Editor = "editor", File = "file", Database = "db", NotUndoable = "sql";
+        /// <summary>Data: DML / PL/SQL block in the agent's session, undone with ROLLBACK TO SAVEPOINT while still uncommitted.</summary>
+        public const string Editor = "editor", File = "file", Database = "db", Data = "data", NotUndoable = "sql";
 
         public int Seq;
         /// <summary>User message the change belongs to.</summary>
@@ -29,6 +30,8 @@ namespace PlsqlDevAgent.Agent
         /// <summary>Id of the single "Revert" button (EditJournal) or of the database backup.</summary>
         public string UndoId, BackupId;
         public string Connection, ObjectType, Owner, Name;
+        /// <summary>Data changes: savepoint set before the statement (null: the statement started the transaction) and the transaction.</summary>
+        public string Savepoint, TransactionId;
         public volatile bool Reverted;
     }
 
@@ -41,6 +44,35 @@ namespace PlsqlDevAgent.Agent
         private static readonly ConcurrentDictionary<string, ChangeJournal> ByChat = new ConcurrentDictionary<string, ChangeJournal>();
 
         public static ChangeJournal For(string chatId) => ByChat.GetOrAdd(chatId ?? "", _ => new ChangeJournal());
+
+        // The agent's database session is shared by all chats, so its transaction is looked at across all journals.
+
+        /// <summary>Statements of all chats whose changes are part of the transaction and not undone (oldest first).</summary>
+        public static List<string> StatementsInTransaction(string transaction, ChangeJournal extra = null) =>
+            OpenInTransaction(transaction, extra).Select(r => r.Label).ToList();
+
+        /// <summary>Changes of all chats that are part of the transaction and not undone (oldest first).</summary>
+        public static List<ChangeRecord> OpenInTransaction(string transaction, ChangeJournal extra = null)
+        {
+            if (transaction == null) return new List<ChangeRecord>();
+            return AllJournals(extra).SelectMany(j => j.Snapshot())
+                .Where(r => r.TransactionId == transaction && !r.Reverted).OrderBy(r => r.Seq).ToList();
+        }
+
+        /// <summary>The transaction's recorded changes were rolled back (Rollback button): they need no rewinding.</summary>
+        public static void MarkTransactionReverted(string transaction)
+        {
+            if (transaction == null) return;
+            foreach (var r in AllJournals(null).SelectMany(j => j.Snapshot()).Where(r => r.TransactionId == transaction)) r.Reverted = true;
+        }
+
+        private static IEnumerable<ChangeJournal> AllJournals(ChangeJournal extra) =>
+            extra == null || ByChat.Values.Contains(extra) ? ByChat.Values : ByChat.Values.Concat(new[] { extra });
+
+        private List<ChangeRecord> Snapshot()
+        {
+            lock (_lock) return _records.ToList();
+        }
 
         private readonly object _lock = new object();
         private readonly List<ChangeRecord> _records = new List<ChangeRecord>();
@@ -139,8 +171,10 @@ namespace PlsqlDevAgent.Agent
             var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var objects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             string connection = null;
+            var records = journal.OpenFrom(fromSeq);
+            var inPlan = new HashSet<ChangeRecord>(records);
 
-            foreach (var r in journal.OpenFrom(fromSeq))
+            foreach (var r in records)
             {
                 if (r.Kind == ChangeRecord.NotUndoable) { plan.NotUndoable.Add(r); continue; }
                 var step = new RewindStep { Record = r };
@@ -165,6 +199,15 @@ namespace PlsqlDevAgent.Agent
                             if (!files.TryGetValue(r.Path, out var content)) content = ReadFile(r.Path);
                             if (content == r.After) files[r.Path] = r.Before;
                             else { files[r.Path] = content; step.Problem = L.T("the file was changed afterwards"); }
+                            break;
+
+                        case ChangeRecord.Data:
+                            step.Text = L.T("Roll back the data changes of: {0}", r.Label);
+                            if (ctx.Ide.PendingTransaction == null || ctx.Ide.PendingTransaction != r.TransactionId)
+                                step.Problem = L.T("already committed (by a COMMIT or a DDL statement afterwards)");
+                            else if (r.Savepoint == null && ChangeJournal.OpenInTransaction(r.TransactionId, journal).Any(o => !inPlan.Contains(o)))
+                                // the statement started the transaction: undoing it is a full ROLLBACK, which must not take other changes along
+                                step.Problem = L.T("the same transaction contains later changes that are not part of this rewind (e.g. from another chat)");
                             break;
 
                         case ChangeRecord.Database:
@@ -196,7 +239,7 @@ namespace PlsqlDevAgent.Agent
         }
 
         /// <summary>Undoes the steps of the plan that can be undone (checking each one again) and describes the result.</summary>
-        public static List<string> Execute(RewindPlan plan, ToolContext ctx)
+        public static List<string> Execute(RewindPlan plan, ToolContext ctx, ChangeJournal journal = null)
         {
             var lines = new List<string>();
             foreach (var step in plan.Steps)
@@ -221,6 +264,14 @@ namespace PlsqlDevAgent.Agent
                             EditJournal.Remove(r.UndoId);
                             break;
 
+                        case ChangeRecord.Data:
+                            if (ctx.Ide.PendingTransaction == null || ctx.Ide.PendingTransaction != r.TransactionId)
+                                throw new IdeException(L.T("already committed (by a COMMIT or a DDL statement afterwards)"));
+                            // no savepoint: the statement started the transaction, so everything in it is from here on
+                            var rollback = ctx.Ide.Execute(r.Savepoint == null ? "rollback" : "rollback to savepoint " + r.Savepoint);
+                            if (!rollback.Ok) throw new IdeException(rollback.ErrorMessage);
+                            break;
+
                         case ChangeRecord.Database:
                             if (!SameSource(Db.CurrentSource(ctx, r.ObjectType, r.Owner, r.Name), r.After))
                                 throw new IdeException(L.T("it was changed in the database afterwards"));
@@ -239,7 +290,20 @@ namespace PlsqlDevAgent.Agent
             }
             foreach (var r in plan.NotUndoable)
                 lines.Add("• " + L.T("Not undone (cannot be undone automatically): {0}", r.Label));
+            CloseEmptyTransaction(ctx, journal);
             return lines;
+        }
+
+        /// <summary>
+        /// ROLLBACK TO SAVEPOINT keeps the transaction open. If no recorded change of any chat is left in it, it is
+        /// ended, so the session holds no transaction (and no "uncommitted changes" notice) without a reason.
+        /// </summary>
+        private static void CloseEmptyTransaction(ToolContext ctx, ChangeJournal journal)
+        {
+            var txn = ctx.Ide.PendingTransaction;
+            if (txn == null || ChangeJournal.StatementsInTransaction(txn, journal).Count > 0) return;
+            try { ctx.Ide.Execute("rollback"); }
+            catch (Exception ex) { Log.Warn("Ending the empty transaction failed: " + ex.Message); }
         }
 
         private static string Drop(ToolContext ctx, ChangeRecord r)

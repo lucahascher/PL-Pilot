@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
 using PlsqlDevAgent.Agent;
@@ -93,8 +94,16 @@ namespace PlsqlDevAgent
 
         public void OnConnectionChange()
         {
+            var txn = _ide.UsesOwnSession ? _ide.PendingTransaction : null;
+            var statements = ChangeJournal.StatementsInTransaction(txn);
             _ide.ResetSession();
-            if (IsOpen) _chat.OnConnectionChanged();
+            if (IsOpen)
+            {
+                _chat.OnConnectionChanged();
+                if (txn != null)
+                    _chat.Notice(L.T("The connection changed while the agent session had uncommitted changes ({0}). PL/SQL Developer has closed that session: check whether they were saved.",
+                        statements.Count == 0 ? txn : string.Join("; ", statements)));
+            }
         }
 
         public void OnWindowChange()
@@ -119,11 +128,43 @@ namespace PlsqlDevAgent
             string question = null;
             if (IsOpen && _chat.IsBusy) question = L.T("PL/Pilot is still working. Close PL/SQL Developer anyway?");
             else if (_ide.IsExecutingSql) question = L.T("PL/Pilot is still executing a database statement. Close PL/SQL Developer anyway?");
-            if (question == null) return true;
-            var r = IsOpen
-                ? MessageBox.Show(_chat, question, "PL/Pilot", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
-                : MessageBox.Show(question, "PL/Pilot", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            return r == DialogResult.Yes;
+            if (question != null)
+            {
+                var r = IsOpen
+                    ? MessageBox.Show(_chat, question, "PL/Pilot", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                    : MessageBox.Show(question, "PL/Pilot", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (r != DialogResult.Yes) return false;
+            }
+            return EndTransactionBeforeClose();
+        }
+
+        /// <summary>
+        /// Uncommitted changes in the agent's own session: the user decides (commit, roll back, or do not close)
+        /// instead of leaving it to whatever happens when PL/SQL Developer closes the session.
+        /// </summary>
+        private bool EndTransactionBeforeClose()
+        {
+            var txn = _ide.PendingTransaction;
+            if (txn == null || !_ide.UsesOwnSession) return true;
+            var statements = ChangeJournal.StatementsInTransaction(txn);
+            var text = L.T("The database session of PL/Pilot has uncommitted changes:\n\n{0}\n\nCommit them?\nYes = Commit, No = Rollback, Cancel = do not close PL/SQL Developer",
+                statements.Count == 0 ? L.T("(open transaction)") : "- " + string.Join("\n- ", statements.Take(15)) + (statements.Count > 15 ? "\n- …" : ""));
+            var answer = IsOpen
+                ? MessageBox.Show(_chat, text, "PL/Pilot", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning)
+                : MessageBox.Show(text, "PL/Pilot", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+            if (answer == DialogResult.Cancel) return false;
+            try
+            {
+                var res = _ide.Execute(answer == DialogResult.Yes ? "commit" : "rollback");
+                if (!res.Ok) throw new IdeException(res.ErrorMessage);
+                Log.Info($"On closing: {(answer == DialogResult.Yes ? "committed" : "rolled back")} the agent's transaction {txn}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "PL/Pilot", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
         }
 
         private bool IsOpen => _chat != null && !_chat.IsDisposed;

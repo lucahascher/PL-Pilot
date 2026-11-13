@@ -38,8 +38,51 @@ namespace PlsqlDevAgent.Testing
             else if (mode == "SQL-ONLY") _ = SqlRunAsync(plugin);
             else if (mode == "REWIND-ONLY") _ = SqlRunAsync(plugin, rewindOnly: true);
             else if (mode == "HTTPS-ONLY") _ = HttpsRunAsync();
+            else if (mode == "TXN-ONLY") _ = SqlRunAsync(plugin, transactionOnly: true);
+            else if (mode == "TXN-CLOSE") _ = CloseWithTransactionAsync(plugin);
             else _ = RunAsync(plugin);
         }
+
+        /// <summary>
+        /// Closes PL/SQL Developer while the agent session has an uncommitted UPDATE (SAL of 7839 + 1000) and answers
+        /// the plug-in's question automatically: PLSQLDEVAGENT_AUTOTEST_ANSWER = commit | rollback (default).
+        /// The result is checked afterwards in the database (the report is written before closing).
+        /// </summary>
+        private static async Task CloseWithTransactionAsync(Plugin plugin)
+        {
+            var ide = plugin.Ide;
+            Line("# PL/Pilot – closing with uncommitted changes");
+            for (int i = 0; i < 120 && !ide.GetContext().Connected; i++) await Task.Delay(500);
+            var journal = ChangeJournal.For("selftest-close");
+            var ctx = new ToolContext
+            {
+                Ide = ide, Config = AgentConfig.Load(), RequestApproval = r => Task.FromResult(ApprovalResult.Yes()),
+                RecordChange = r => journal.Add(r),
+            };
+            await Tool(ctx, "execute_sql", new JObject { ["sql"] = "update emp set sal = sal + 1000 where empno = 7839" }, "not committed");
+            Line("Open transaction before closing: " + ide.PendingTransaction);
+            bool commit = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_ANSWER") == "commit";
+            File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+            _ = Task.Run(async () =>
+            {
+                for (int i = 0; i < 200; i++)
+                {
+                    var dialog = FindWindow("#32770", "PL/Pilot");
+                    if (dialog != IntPtr.Zero)
+                    {
+                        Log.Info("Self test: answering the close dialog with " + (commit ? "Yes (commit)" : "No (rollback)"));
+                        PostMessage(dialog, 0x0111 /* WM_COMMAND */, new IntPtr(commit ? 6 /* IDYES */ : 7 /* IDNO */), IntPtr.Zero);
+                        return;
+                    }
+                    await Task.Delay(100);
+                }
+                Log.Warn("Self test: the close dialog did not appear");
+            });
+            await CloseIde();
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string className, string title);
 
         /// <summary>
         /// HTTPS to LLM servers from inside PL/SQL Developer (CLR hosted by a native program: TLS defaults differ from
@@ -87,13 +130,14 @@ namespace PlsqlDevAgent.Testing
         }
 
         /// <summary>Only the background SQL / Stop / DBA views checks (quick run).</summary>
-        private static async Task SqlRunAsync(Plugin plugin, bool rewindOnly = false)
+        private static async Task SqlRunAsync(Plugin plugin, bool rewindOnly = false, bool transactionOnly = false)
         {
             try
             {
                 Line("# PL/Pilot – background SQL self test");
                 for (int i = 0; i < 120 && !plugin.Ide.GetContext().Connected; i++) await Task.Delay(500);
-                if (rewindOnly) await RewindChecks(plugin.Ide, AgentConfig.Load());
+                if (transactionOnly) await TransactionChecks(plugin.Ide, AgentConfig.Load());
+                else if (rewindOnly) await RewindChecks(plugin.Ide, AgentConfig.Load());
                 else await SqlThreadChecks(plugin.Ide, AgentConfig.Load());
                 Line($"\n**Total: {_pass} passed, {_fail} failed**");
             }
@@ -142,9 +186,10 @@ namespace PlsqlDevAgent.Testing
             var plan = await Task.Run(() => Rewinder.Plan(journal, journal.StartOfCheckpoint("cp1").Value, plain, null));
             Line("Plan:\n" + string.Join("\n", plan.Steps.Select(st => $"- {st.Text}{(st.Problem == null ? "" : " PROBLEM: " + st.Problem)}")) +
                  "\n" + string.Join("\n", plan.NotUndoable.Select(r => "- not undoable: " + r.Label)));
-            Check("rewind plan: 5 undoable steps, 1 statement that cannot be undone", plan.Undoable == 5 && plan.Steps.Count == 5 && plan.NotUndoable.Count == 1);
+            // the UPDATE (even with 0 rows) opens a transaction in the agent session, so it is rolled back as well
+            Check("rewind plan: 6 undoable steps incl. rolling back the open UPDATE", plan.Undoable == 6 && plan.Steps.Count == 6 && plan.NotUndoable.Count == 0);
 
-            var lines = await Task.Run(() => Rewinder.Execute(plan, plain));
+            var lines = await Task.Run(() => Rewinder.Execute(plan, plain, journal));
             Line("Result:\n" + string.Join("\n", lines));
             var windows = await Task.Run(() => ide.GetAllEditorTexts());
             Check("rewind: first editor window (not the active one) has its old text again", windows.Any(w => w.Trim() == "select 1 a from dual") && !windows.Any(w => w.Trim() == "select 2 a from dual"));
@@ -155,7 +200,7 @@ namespace PlsqlDevAgent.Testing
             Check("rewind: the procedure created by the agent is dropped, the dropped one is back", names == "PDA_RW_DROP,PDA_RW_EXISTING");
             var src = await Task.Run(() => Db.CurrentSource(plain, "PROCEDURE", ctx.CurrentSchema, "PDA_RW_EXISTING"));
             Check("rewind: the changed procedure has its original source again", src.Contains("-- original"));
-            Check("rewind: everything is marked as undone", journal.OpenFrom(1).All(r => r.Kind == ChangeRecord.NotUndoable));
+            Check("rewind: everything is marked as undone and no transaction is left open", journal.OpenFrom(1).Count == 0 && ide.PendingTransaction == null);
 
             // changed afterwards by the user / someone else -> not undone
             var journal2 = new ChangeJournal();
@@ -171,10 +216,93 @@ namespace PlsqlDevAgent.Testing
             Line("Plan with later changes:\n" + string.Join("\n", plan2.Steps.Select(st => $"- {st.Text}{(st.Problem == null ? "" : " PROBLEM: " + st.Problem)}")));
             Check("rewind: editor text changed by the user afterwards is detected", plan2.Steps.Any(st => st.Record.Kind == ChangeRecord.Editor && st.Problem != null));
             Check("rewind: procedure recompiled by someone else afterwards is detected", plan2.Steps.Any(st => st.Record.Kind == ChangeRecord.Database && st.Problem != null));
-            await Task.Run(() => Rewinder.Execute(plan2, plain));
+            await Task.Run(() => Rewinder.Execute(plan2, plain, journal2));
             Check("rewind: the user's editor text is left alone", (await Task.Run(() => ide.GetEditorText())).Contains("typed by the user"));
             src = await Task.Run(() => Db.CurrentSource(plain, "PROCEDURE", ctx.CurrentSchema, "PDA_RW_EXISTING"));
             Check("rewind: the later database version is left alone", src.Contains("-- someone else"));
+        }
+
+        /// <summary>
+        /// Uncommitted changes in the agent's session: detected after DML, rolled back statement by statement through
+        /// rewind (savepoints), committed implicitly by DDL, and EXPLAIN PLAN leaves no transaction behind.
+        /// </summary>
+        private static async Task TransactionChecks(IIde ide, AgentConfig cfg)
+        {
+            Line("\n## 10. Uncommitted changes of the agent session");
+            await Task.Delay(200);
+            var plain = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+            if (ide.PendingTransaction != null) await Task.Run(() => ide.Execute("rollback"));
+            decimal Sal(int empno) => decimal.Parse(ide.Query($"select sal from emp where empno = {empno}", 1).Rows[0][0].Replace(',', '.'), System.Globalization.CultureInfo.InvariantCulture);
+            decimal king = await Task.Run(() => Sal(7839)), clark = await Task.Run(() => Sal(7782));
+            int events = 0;
+            Action onChange = () => System.Threading.Interlocked.Increment(ref events);
+            ide.TransactionChanged += onChange;
+            try
+            {
+                var journal = new ChangeJournal();
+                journal.StartCheckpoint("t1");
+                var ctx = new ToolContext
+                {
+                    Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()),
+                    RecordChange = r => { r.Checkpoint = "t1"; journal.Add(r); },
+                };
+                await Tool(ctx.ForCall("callA"), "execute_sql", new JObject { ["sql"] = "update emp set sal = sal + 100 where empno = 7839" }, "not committed");
+                Line("Open transaction: " + ide.PendingTransaction);
+                Check("an open transaction is detected after DML", ide.PendingTransaction != null && events >= 1);
+                await Tool(ctx.ForCall("callB"), "execute_sql", new JObject { ["sql"] = "update emp set sal = sal + 100 where empno = 7782" }, "not committed");
+                var statements = ChangeJournal.StatementsInTransaction(ide.PendingTransaction, journal);
+                Check("both statements are listed for the open transaction", statements.Count == 2);
+
+                var plan = await Task.Run(() => Rewinder.Plan(journal, journal.StartOfCall("callB").Value, plain, null));
+                Check("rewind plan: roll back the second update", plan.Undoable == 1 && plan.Steps[0].Record.Kind == ChangeRecord.Data);
+                Line(string.Join("\n", await Task.Run(() => Rewinder.Execute(plan, plain, journal))));
+                Check("rewind rolled back only the second update",
+                    await Task.Run(() => Sal(7782)) == clark && await Task.Run(() => Sal(7839)) == king + 100 && ide.PendingTransaction != null);
+
+                plan = await Task.Run(() => Rewinder.Plan(journal, journal.StartOfCheckpoint("t1").Value, plain, null));
+                Line(string.Join("\n", await Task.Run(() => Rewinder.Execute(plan, plain, journal))));
+                Check("rewinding all data changes restores the data and ends the transaction", await Task.Run(() => Sal(7839)) == king && ide.PendingTransaction == null);
+
+                // DDL commits implicitly: the update can no longer be rolled back
+                await Tool(ctx.ForCall("callC"), "execute_sql", new JObject { ["sql"] = "update emp set sal = sal + 1 where empno = 7839" }, "not committed");
+                await Tool(plain, "compile_plsql", new JObject { ["source"] = "create or replace procedure pda_tx_ddl is\nbegin\n  null;\nend;" }, "compiled successfully");
+                Check("DDL commits the open transaction (the notice disappears)", ide.PendingTransaction == null);
+                plan = await Task.Run(() => Rewinder.Plan(journal, journal.StartOfCall("callC").Value, plain, null));
+                Line("Plan after DDL: " + string.Join("; ", plan.Steps.Select(st => st.Text + " PROBLEM: " + st.Problem)));
+                Check("rewind reports the committed update as no longer undoable", plan.Steps.Count == 1 && plan.Steps[0].Problem != null);
+                await Task.Run(() => { ide.Execute("update emp set sal = sal - 1 where empno = 7839"); ide.Execute("commit"); });
+                Check("COMMIT ends the transaction", ide.PendingTransaction == null && await Task.Run(() => Sal(7839)) == king);
+
+                // two chats share the session: chat A's first statement opened the transaction, chat B added to it
+                var other = ChangeJournal.For("selftest-other-chat");
+                other.StartCheckpoint("o1");
+                var ctxOther = new ToolContext
+                {
+                    Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()),
+                    RecordChange = r => { r.Checkpoint = "o1"; other.Add(r); },
+                };
+                await Tool(ctx.ForCall("callD"), "execute_sql", new JObject { ["sql"] = "update emp set sal = sal + 5 where empno = 7839" }, "not committed");
+                await Tool(ctxOther.ForCall("callE"), "execute_sql", new JObject { ["sql"] = "update emp set sal = sal + 5 where empno = 7782" }, "not committed");
+                plan = await Task.Run(() => Rewinder.Plan(journal, journal.StartOfCall("callD").Value, plain, null));
+                Line("Plan with a change of another chat in the same transaction: " + string.Join("; ", plan.Steps.Select(st => st.Text + " PROBLEM: " + st.Problem)));
+                Check("rewind does not roll back another chat's changes in the same transaction", plan.Undoable == 0 && plan.Steps.Count == 1);
+                Check("the open transaction lists the statements of both chats", ChangeJournal.StatementsInTransaction(ide.PendingTransaction, journal).Count == 2);
+                await Task.Run(() => ide.Execute("rollback"));
+                ChangeJournal.MarkTransactionReverted(plan.Steps[0].Record.TransactionId);
+                Check("ROLLBACK ends it and restores the data", ide.PendingTransaction == null && await Task.Run(() => Sal(7839)) == king && await Task.Run(() => Sal(7782)) == clark);
+
+                await Tool(plain, "explain_plan", new JObject { ["sql"] = "select ename from emp where deptno = 10" }, "Plan hash value");
+                Check("explain_plan leaves no open transaction behind", ide.PendingTransaction == null);
+
+                // a block without DML leaves nothing to commit (Oracle: a SAVEPOINT alone would open a transaction)
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = "begin emp_api.list_emps(10); end;" }, "Executed successfully");
+                Check("a block without DML opens no transaction", ide.PendingTransaction == null);
+            }
+            finally
+            {
+                ide.TransactionChanged -= onChange;
+                if (ide.PendingTransaction != null) await Task.Run(() => ide.Execute("rollback")); // never leave the close dialog to the test
+            }
         }
 
         /// <summary>A statement that runs <paramref name="seconds"/> seconds in the database.</summary>
@@ -421,6 +549,7 @@ namespace PlsqlDevAgent.Testing
                 await EncodingChecks(ide);
                 await SqlThreadChecks(ide, cfg);
                 await RewindChecks(ide, cfg);
+                await TransactionChecks(ide, cfg);
                 Line($"\n**Tool tests: {_pass} passed, {_fail} failed**");
 
                 var prompt = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PROMPT");

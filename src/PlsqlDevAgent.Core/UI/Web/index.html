@@ -223,6 +223,12 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
 .endbar button.primary { color: var(--btn-fg); background: var(--btn); padding: 2px 10px; }
 .endbar button.primary:hover { background: var(--btn-hover); color: var(--btn-fg); }
 
+/* uncommitted changes of the agent's session (above the input) */
+.txn { display: none; margin: 0 8px 6px; border: 1px solid var(--warning); border-radius: 6px; background: var(--widget); font-size: 12px; padding: 3px 4px 3px 8px; gap: 6px; align-items: center; }
+.txn.show { display: flex; }
+.txn > .ic { color: var(--warning); }
+.txn .ttext { flex: 1; min-width: 0; }
+
 /* rewind (undo the agent's changes back to a message or a step) */
 .msg-head .rewind { margin-left: auto; visibility: hidden; color: var(--desc); }
 .msg.user:hover .msg-head .rewind, .msg-head .rewind:focus-visible { visibility: visible; }
@@ -316,6 +322,7 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
 
 <footer>
   <div id="popup"></div>
+  <div id="txn" class="txn"></div>
   <div id="tasks" class="tasks open"></div>
   <div class="inputbox">
     <textarea id="input" rows="1" placeholder="Ask PL/Pilot, / for commands, @ to attach"></textarea>
@@ -550,6 +557,12 @@ const DE = {
   'Undo the changes of this step and of everything after it': 'Die Änderungen dieses Schritts und aller späteren rückgängig machen',
   'Trusted Certificates': 'Vertrauenswürdige Zertifikate', 'Only needed if the server\'s HTTPS certificate is not trusted by Windows (the connection test then shows the thumbprints): SHA-1 or SHA-256 thumbprint of the server certificate or of the CA that issued it; several separated by ;.':
     'Nur nötig, wenn Windows dem HTTPS-Zertifikat des Servers nicht vertraut (der Verbindungstest zeigt dann die Fingerabdrücke an): SHA-1- oder SHA-256-Fingerabdruck des Serverzertifikats oder der ausstellenden Zertifizierungsstelle; mehrere durch ; getrennt.',
+  'Uncommitted data changes in the agent session ({0} statement(s))': 'Nicht festgeschriebene Datenänderungen in der Sitzung des Agents ({0} Anweisung(en))',
+  'Open transaction in the agent session': 'Offene Transaktion in der Sitzung des Agents',
+  'Uncommitted changes in the main session of PL/SQL Developer, which the agent uses: commit or roll back there':
+    'Nicht festgeschriebene Änderungen in der Hauptsitzung von PL/SQL Developer, die der Agent mitbenutzt: dort festschreiben oder verwerfen',
+  'Commit these changes of the agent permanently?': 'Diese Änderungen des Agents dauerhaft festschreiben (Commit)?',
+  'Roll back (discard) these changes of the agent?': 'Diese Änderungen des Agents verwerfen (Rollback)?',
   'Separate Session': 'Eigene Sitzung', 'Use a separate database session for the agent, so it does not touch your transaction.': 'Eine eigene Datenbanksitzung für den Agent verwenden, damit er Ihre Transaktion nicht berührt.',
   'Auto Approve Editor Edits': 'Editor-Änderungen automatisch zulassen', 'Apply editor edits without asking.': 'Editor-Änderungen ohne Rückfrage übernehmen.',
   'Auto Approve SQL': 'SQL automatisch zulassen', 'Execute SQL and compile without asking. DROP, DELETE and TRUNCATE always ask.': 'SQL ohne Rückfrage ausführen und kompilieren. Bei DROP, DELETE und TRUNCATE wird immer gefragt.',
@@ -581,7 +594,7 @@ function t(en, ...args) {
 const tr = t; // alias for places where 't' is used as a variable name
 /** Translates the static texts, placeholders and tooltips outside the chat messages. */
 function applyI18n() {
-  const skip = '#messages, #chatList, #popup, #tasks, #ctx, #modelLabel, #meter, #hint, #guard, #btnMode, #promptState, #rulesInfo, #testResult, #edInfo, #edTitle, script, style';
+  const skip = '#messages, #chatList, #popup, #tasks, #txn, #ctx, #modelLabel, #meter, #hint, #guard, #btnMode, #promptState, #rulesInfo, #testResult, #edInfo, #edTitle, script, style';
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT,
     { acceptNode: n => n.parentElement && !n.parentElement.closest(skip) && n.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
   const nodes = [];
@@ -608,6 +621,7 @@ function setLang(l) {
   setBusy(busy);
   setGuard(guardState);
   setUsage(lastUsage);
+  renderTxn();
   if (messagesEl.querySelector('.empty')) showEmpty();
 }
 let assistants = {};   // id -> {el, raw, reasoning, contentEl, reasonEl}
@@ -1125,6 +1139,26 @@ function setBusy(b) {
   hint.className = 'hint' + (b ? ' busy' : '');
   hint.innerHTML = b ? '<span class="spinner"></span><span>' + t('Working…  Esc to stop') + '</span>' : '';
   if (b) removeEndbar(); else { showEndbar(); inputEl.focus(); }
+  renderTxn();
+}
+// ---------------------------------------------------------------- uncommitted changes of the agent's session
+let txnState = null;
+function renderTxn(m) {
+  if (m) txnState = m;
+  const box = $('txn'), s = txnState;
+  if (!s || !s.active) { box.className = 'txn'; box.innerHTML = ''; box.title = ''; return; }
+  const list = (s.statements || []).join('\n');
+  box.className = 'txn show';
+  box.title = list;
+  box.innerHTML = icon('warning') + '<span class="ttext">' + esc(s.own
+    ? (s.statements && s.statements.length ? t('Uncommitted data changes in the agent session ({0} statement(s))', s.statements.length) : t('Open transaction in the agent session'))
+    : t('Uncommitted changes in the main session of PL/SQL Developer, which the agent uses: commit or roll back there')) + '</span>' +
+    (s.own ? '<button class="small" data-txn="commit"' + (busy ? ' disabled' : '') + '>Commit</button><button class="small" data-txn="rollback"' + (busy ? ' disabled' : '') + '>Rollback</button>' : '');
+  box.querySelectorAll('button[data-txn]').forEach(b => b.onclick = () => {
+    const commit = b.dataset.txn === 'commit';
+    const q = commit ? t('Commit these changes of the agent permanently?') : t('Roll back (discard) these changes of the agent?');
+    if (confirm(q + (list ? '\n\n' + list : ''))) send({ type: commit ? 'txn_commit' : 'txn_rollback' });
+  });
 }
 let lastUsage = null;
 function setUsage(m) {
@@ -1454,6 +1488,7 @@ function onHost(m) {
     case 'rewind_plan': rewindPlan(m); break;
     case 'rewind_done': rewindDone(m); break;
     case 'rewound': rewound(m); break;
+    case 'txn': renderTxn(m); break;
     case 'tasks': renderTasks(m.items || []); break;
     case 'subtask_step': subtaskStep(m); break;
     case 'attachments': addAttachments(m.items || []); break;

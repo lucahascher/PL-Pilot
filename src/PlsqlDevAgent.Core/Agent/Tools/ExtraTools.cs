@@ -37,16 +37,30 @@ namespace PlsqlDevAgent.Agent.Tools
             var id = "PDA" + Guid.NewGuid().ToString("N").Substring(0, 12).ToUpperInvariant();
 
             // EXPLAIN PLAN only writes into PLAN_TABLE (a session private temporary table); the statement is not run.
+            // Those rows open a transaction: if none was open before, it is rolled back after reading the plan.
+            bool cleanUp = ctx.Ide.UsesOwnSession && ctx.Ide.PendingTransaction == null;
+            try
+            {
+                return Task.FromResult(Explain(ctx, sql, original, id, format, dbaIde, dbaViews));
+            }
+            finally
+            {
+                if (cleanUp && ctx.Ide.PendingTransaction != null) ctx.Ide.Execute("rollback");
+            }
+        }
+
+        private static string Explain(ToolContext ctx, string sql, string original, string id, string format, DbaViewsIde dbaIde, List<string> dbaViews)
+        {
             var res = ctx.Ide.Execute($"explain plan set statement_id = '{id}' for {sql}");
             if (!res.Ok && dbaIde != null && !ReferenceEquals(sql, original) && DbaViewsIde.IsFallbackError(res.ErrorCode))
             {
                 dbaIde.MarkUnreadable(dbaViews, res.ErrorCode, sql);
                 res = ctx.Ide.Execute($"explain plan set statement_id = '{id}' for {original}");
             }
-            if (!res.Ok) return Task.FromResult("EXPLAIN PLAN failed: " + res.ErrorMessage);
+            if (!res.Ok) return "EXPLAIN PLAN failed: " + res.ErrorMessage;
             var plan = ctx.Ide.Query($"select plan_table_output from table(dbms_xplan.display('PLAN_TABLE', '{id}', '{format}'))", 1000);
             var text = string.Join("\n", plan.Rows.Select(r => r[0]));
-            return Task.FromResult(Db.Truncate(text.Length == 0 ? "(no plan returned)" : text, ctx.Config.MaxToolOutputChars));
+            return Db.Truncate(text.Length == 0 ? "(no plan returned)" : text, ctx.Config.MaxToolOutputChars);
         }
     }
 

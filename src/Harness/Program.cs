@@ -102,7 +102,7 @@ namespace PlsqlDevAgent.Harness
 
             Shown += async (s, e) =>
             {
-                Plugin.Create(new MockIde(this));
+                Plugin.Create(_ide = new MockIde(this));
                 if (_autoTestDir != null) await AutoTest();
             };
         }
@@ -115,6 +115,7 @@ namespace PlsqlDevAgent.Harness
         }
 
         private ChatForm _chat;
+        private MockIde _ide;
         private StringWriter _log;
         private int _pass, _fail;
 
@@ -163,7 +164,7 @@ namespace PlsqlDevAgent.Harness
                 if (_prompt.StartsWith("Please improve"))
                 {
                     if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await PromptChecks(); }
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await PromptChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -519,6 +520,42 @@ namespace PlsqlDevAgent.Harness
             await Task.Delay(300);
             d = await Js(DistanceJs);
             Check($"a small scroll up is respected, the next output does not pull the view down ({d} px)", int.Parse(d) >= 30);
+        }
+
+        /// <summary>Uncommitted changes of the agent session: notice above the input, Rollback and Commit buttons, note to the model.</summary>
+        private async Task TransactionUiChecks()
+        {
+            await Js("document.getElementById('btnNew').click()");
+            await Task.Delay(600);
+            Check("no notice without uncommitted changes", await Js("document.getElementById('txn').className") == "txn");
+            await SendAndWait("DMLTEST raise the salaries");
+            var bar = await Js("document.getElementById('txn').innerText");
+            Check("uncommitted changes notice with the statement count: " + bar.Replace("\n", " "), bar.Contains("Uncommitted data changes") && bar.Contains("1 statement"));
+            Check("the notice lists the statement in its tooltip", (await Js("document.getElementById('txn').title")).Contains("update emp set sal"));
+            Check("the update step can be rewound", await Js("document.querySelectorAll('[data-rewind-call]').length") == "1");
+            var capture = _chat.CapturePageAsync(Path.Combine(_autoTestDir, "uncommitted.png"));
+            await Task.WhenAny(capture, Task.Delay(5000));
+
+            // Rollback (the page asks first)
+            await Js("window.confirm = () => true; document.querySelector('#txn button[data-txn=\"rollback\"]').click()");
+            await Task.Delay(1500);
+            Check("Rollback ran in the agent session and the notice is gone",
+                _ide.ExecutedSql.Last() == "rollback" && _ide.PendingTransaction == null && await Js("document.getElementById('txn').className") == "txn");
+            Check("the chat shows the rollback", (await Js("document.getElementById('messages').innerText")).Contains("Rolled back the changes of the agent."));
+            await Js("document.querySelector('[data-rewind-call]').click()");
+            await Task.Delay(1000);
+            Check("after the rollback the update needs no rewinding", (await Js("document.querySelector('.rewind-card').innerText")).Contains("no changes after this point"));
+            await Js("document.querySelector('.rewind-card button[data-a=\"cancel\"]').click()");
+
+            // Commit
+            await SendAndWait("DMLTEST once more");
+            await Js("document.querySelector('#txn button[data-txn=\"commit\"]').click()");
+            await Task.Delay(1500);
+            Check("Commit ran in the agent session and the notice is gone",
+                _ide.ExecutedSql.Last() == "commit" && await Js("document.getElementById('txn').className") == "txn");
+            await SendAndWait("Answer briefly: done?");
+            Check("the model was told about the rollback and the commit",
+                MockLlmServer.LastMessagesJson.Contains("ROLLED BACK") && MockLlmServer.LastMessagesJson.Contains("COMMITTED"));
         }
 
         /// <summary>Rewind through the chat UI: "Undo from here" on a step, then back to before the first message with "edit".</summary>

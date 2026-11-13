@@ -35,12 +35,21 @@ every change is shown to you (with a diff) and needs your approval.
   - **backups**: before the agent replaces or drops a PL/SQL unit or view, the database version is saved
     (`%LOCALAPPDATA%\PlsqlDevAgent\backups`); "Restore previous" button in the chat, `restore_backup` tool
   - **undo**: "Revert" button for every editor/file edit the agent (or an Insert button) applied
+  - **uncommitted changes**: DML of the agent stays uncommitted in its own session. After every statement the
+    plug-in checks the session's transaction (`dbms_transaction.local_transaction_id`, no extra privileges); while
+    one is open, a notice above the input lists the statements with **Commit** / **Rollback** buttons, and closing
+    PL/SQL Developer asks *Commit / Rollback / Cancel* instead of leaving it to the session's logoff. The agent is told
+    what the user decided. EXPLAIN PLAN cleans up its PLAN_TABLE rows so it does not leave a transaction behind.
+    (With *Separate session* off, the agent shares the IDE's main session: the notice then only points to
+    PL/SQL Developer's own Commit / Rollback.)
   - **rewind**: every change is recorded per chat in order (editor windows, files, PL/SQL units and views incl.
     created/dropped ones). *Rewind* on a user message undoes everything since that message, *Undo from here* on a
     tool step undoes that step and everything after it; a preview lists what happens first. Optionally the
     conversation is cut off there and the message is put back into the input box to edit and resend. A change is
     only undone while its target still looks exactly as the agent left it (edited afterwards → skipped and
-    reported); editor edits are found in any open window. DML and other DDL cannot be undone and are listed.
+    reported); editor edits are found in any open window. Uncommitted DML is rolled back statement by statement
+    (savepoints; ROLLBACK for the statement that opened the transaction); once committed – by COMMIT or implicitly
+    by DDL – it cannot be undone, nor can other DDL (both are listed).
     The undo information is kept until PL/SQL Developer is closed.
   - separate database session for the agent (does not touch your transaction), read-only mode, the
     connection password is never read

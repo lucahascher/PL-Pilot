@@ -121,10 +121,20 @@ namespace PlsqlDevAgent.Harness
         public ExecResult Execute(string sql)
         {
             lock (ExecutedSql) ExecutedSql.Add(sql);
+            // simulated transaction: DML opens one, COMMIT / ROLLBACK / DDL end it, ROLLBACK TO SAVEPOINT keeps it
+            var s = sql.TrimStart().ToUpperInvariant();
+            var txn = _transaction;
+            if (s.StartsWith("INSERT") || s.StartsWith("UPDATE") || s.StartsWith("DELETE") || s.StartsWith("MERGE")) txn = txn ?? "1.2.3";
+            else if (s.StartsWith("COMMIT") || (s.StartsWith("ROLLBACK") && !s.Contains(" TO ")) || s.StartsWith("CREATE") || s.StartsWith("DROP") || s.StartsWith("ALTER")) txn = null;
+            if (txn != _transaction) { _transaction = txn; TransactionChanged?.Invoke(); }
             return new ExecResult { ErrorCode = 0, DbmsOutput = "" };
         }
 
         public bool IsExecutingSql => false;
+        private string _transaction;
+        public string PendingTransaction => _transaction;
+        public event Action TransactionChanged;
+        public bool UsesOwnSession => true;
 
         public void RefreshObject(string objectType, string owner, string name, int action) { }
 

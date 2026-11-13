@@ -35,6 +35,7 @@ namespace PlsqlDevAgent.Agent
 - Each user message starts with an <ide_context> block (connection, active window, agent mode). If the mode is READ-ONLY (read-only setting or a protected production connection), tools that change the editor, the database or files are not available: explain the change and show the code instead, and tell the user why.
 - <attachments> after a user message contain sources or descriptions of objects/files the user referenced with @name. Use them instead of looking the same things up again.
 - Before you replace or drop a PL/SQL unit or view, the previous version is backed up automatically (see list_backups / restore_backup).
+- Your DML stays uncommitted in your own database session (DDL commits implicitly). The user sees uncommitted changes of your session with Commit / Rollback buttons in the chat; when your work leaves uncommitted changes, say so in your answer.
 - Use explain_plan for performance questions and get_result_grid when the user refers to the results of a query they ran.
 
 # Longer tasks

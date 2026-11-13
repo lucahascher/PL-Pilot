@@ -62,6 +62,7 @@ namespace PlsqlDevAgent.UI
             ApplyIdeSettings();
             _session = new AgentSession(ide, this, _config);
             _session.Journal = ChangeJournal.For(_chatId);
+            _ide.TransactionChanged += OnTransactionChanged;
 
             Text = "PL/Pilot";
             StartPosition = FormStartPosition.Manual;
@@ -138,6 +139,7 @@ namespace PlsqlDevAgent.UI
             _shuttingDown = true;
             try { SaveBounds(); } catch { }
             try { SaveChat(); } catch { }
+            try { _ide.TransactionChanged -= OnTransactionChanged; } catch { }
             try { _session.Dispose(); } catch { }
             try { Close(); Dispose(); } catch { }
         }
@@ -302,6 +304,15 @@ namespace PlsqlDevAgent.UI
                     }, false);
                     foreach (var p in _pending) _web.CoreWebView2.PostWebMessageAsJson(p);
                     _pending.Clear();
+                    Post(TransactionJson(), false);
+                    break;
+
+                case "txn_commit":
+                    EndTransaction(true);
+                    break;
+
+                case "txn_rollback":
+                    EndTransaction(false);
                     break;
 
                 case "send":
@@ -696,6 +707,52 @@ namespace PlsqlDevAgent.UI
             });
         }
 
+        // ------------------------------------------------------------------ uncommitted changes of the agent's session
+
+        private void OnTransactionChanged() => Post(TransactionJson(), false);
+
+        private JObject TransactionJson()
+        {
+            var txn = _ide.PendingTransaction;
+            return new JObject
+            {
+                ["type"] = "txn",
+                ["active"] = txn != null,
+                ["own"] = _ide.UsesOwnSession,
+                ["statements"] = new JArray(ChangeJournal.StatementsInTransaction(txn)),
+            };
+        }
+
+        /// <summary>Commit / Rollback button for the open transaction of the agent's own session.</summary>
+        private void EndTransaction(bool commit)
+        {
+            if (_session.IsBusy) { Post(new JObject { ["type"] = "notice", ["text"] = L.T("Stop the agent before committing or rolling back.") }, false); return; }
+            if (!_ide.UsesOwnSession) { Post(new JObject { ["type"] = "notice", ["text"] = L.T("The agent uses the main session of PL/SQL Developer: commit or roll back there.") }, false); return; }
+            var txn = _ide.PendingTransaction;
+            if (txn == null) { Post(TransactionJson(), false); return; }
+            var statements = ChangeJournal.StatementsInTransaction(txn);
+            Task.Run(() =>
+            {
+                try
+                {
+                    var res = _ide.Execute(commit ? "commit" : "rollback");
+                    if (!res.Ok) throw new IdeException(res.ErrorMessage);
+                    if (!commit) ChangeJournal.MarkTransactionReverted(txn);
+                    var list = statements.Count == 0 ? "" : ": " + string.Join("; ", statements);
+                    Log.Info((commit ? "User committed" : "User rolled back") + " the agent's transaction " + txn + list);
+                    _session.AddNote(commit
+                        ? "The user COMMITTED the pending data changes of your database session" + list + "."
+                        : "The user ROLLED BACK the pending data changes of your database session" + list + "; they no longer exist.");
+                    Post(new JObject { ["type"] = "applied", ["text"] = commit ? L.T("Committed the changes of the agent.") : L.T("Rolled back the changes of the agent.") });
+                }
+                catch (Exception ex)
+                {
+                    Post(new JObject { ["type"] = "error", ["text"] = (commit ? "COMMIT: " : "ROLLBACK: ") + ex.Message });
+                }
+                Post(TransactionJson(), false);
+            });
+        }
+
         // ------------------------------------------------------------------ rewind
 
         /// <summary>Where undoing starts: the beginning of a user message or the first change of a tool call.</summary>
@@ -757,7 +814,7 @@ namespace PlsqlDevAgent.UI
                     {
                         var ctx = _session.UserActionContext();
                         var plan = Rewinder.Plan(journal, start.Value, ctx, _session.CurrentGuard());
-                        lines = Rewinder.Execute(plan, ctx);
+                        lines = Rewinder.Execute(plan, ctx, journal);
                         foreach (var s in plan.Steps)
                         {
                             if (s.Record.Reverted) { if (s.Record.UndoId != null) reverted.Add(s.Record.UndoId); if (s.Record.BackupId != null) reverted.Add(s.Record.BackupId); }
@@ -1073,8 +1130,12 @@ namespace PlsqlDevAgent.UI
         public void ToolStart(string callId, string toolName, string summary, string argumentsJson) =>
             Post(new JObject { ["type"] = "tool_start", ["callId"] = callId, ["name"] = toolName, ["summary"] = summary, ["args"] = Shorten(argumentsJson, 20000) });
 
-        public void ToolEnd(string callId, bool ok, string result, JObject meta) =>
+        public void ToolEnd(string callId, bool ok, string result, JObject meta)
+        {
             Post(new JObject { ["type"] = "tool_end", ["callId"] = callId, ["ok"] = ok, ["result"] = Shorten(result, 20000), ["meta"] = meta });
+            // the statement list of an open transaction is complete only after the tool recorded its change
+            if (_ide.PendingTransaction != null) Post(TransactionJson(), false);
+        }
 
         public void Attachments(JArray items) => Post(new JObject { ["type"] = "attachments", ["items"] = items });
 

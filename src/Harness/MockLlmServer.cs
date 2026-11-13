@@ -120,6 +120,13 @@ namespace PlsqlDevAgent.Harness
                     : Final($"Findings{label}: table EMP is used in EMP_API.list_emps (line 4).");
             }
 
+            if (request.Contains("DMLTEST"))
+            {
+                bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);
+                return done ? Final("Raised the salaries of department 10. The change is not committed yet.")
+                    : ToolCall("dml_" + messages.Count, "execute_sql", new JObject { ["sql"] = "update emp set sal = sal * 1.1 where deptno = 10", ["purpose"] = "Raise salaries" });
+            }
+
             if (request.Contains("REWINDTEST"))
             {
                 var sinceUser = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").ToList();

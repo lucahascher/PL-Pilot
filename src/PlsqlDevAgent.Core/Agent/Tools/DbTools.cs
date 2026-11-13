@@ -601,6 +601,10 @@ namespace PlsqlDevAgent.Agent.Tools
             @"^DROP\s+(?<t>PACKAGE\s+BODY|PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE\s+BODY|TYPE|VIEW)\s+(?:(?<o>""[^""]+""|[\w$#]+)\s*\.\s*)?(?<n>""[^""]+""|[\w$#]+)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        /// <summary>Statements that change data inside the transaction (no implicit commit).</summary>
+        private static readonly HashSet<string> DataKeywords = new HashSet<string> { "INSERT", "UPDATE", "DELETE", "MERGE", "BEGIN", "DECLARE", "CALL", "LOCK" };
+        private static int _savepoints;
+
         private static readonly Regex ViewRegex = new Regex(
             @"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NO\s+)?FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?VIEW\s+(?:(?<o>""[^""]+""|[\w$#]+)\s*\.\s*)?(?<n>""[^""]+""|[\w$#]+)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -652,11 +656,35 @@ namespace PlsqlDevAgent.Agent.Tools
                 pending.Add(Db.BeforeChange(ctx, dtype, downer, Ident(dm.Groups["n"].Value), "drop", null));
             }
 
+            // Data changes (DML, PL/SQL blocks) can be rewound while uncommitted. In an open transaction a savepoint
+            // marks the state before the statement; without one, the statement starts the transaction and rewinding it
+            // is a plain ROLLBACK (a SAVEPOINT would open a transaction by itself, even if the statement changes nothing).
+            string savepoint = null;
+            bool rewindable = false;
+            if (pending.Count == 0 && ctx.RecordChange != null && DataKeywords.Contains(kw) && ctx.Ide.UsesOwnSession)
+            {
+                rewindable = true;
+                if (ctx.Ide.PendingTransaction != null)
+                {
+                    savepoint = "PDA_SP_" + System.Threading.Interlocked.Increment(ref _savepoints);
+                    rewindable = ctx.Ide.Execute("savepoint " + savepoint).Ok;
+                }
+            }
+
             var res = ctx.Ide.Execute(sql);
             if (res.Ok || res.CompiledWithErrors)
             {
                 foreach (var p in pending) Db.AfterChange(ctx, p);
-                if (pending.Count == 0) ctx.Changed(new ChangeRecord { Kind = ChangeRecord.NotUndoable, Label = RunQueryTool.OneLine(sql) });
+                if (pending.Count == 0)
+                {
+                    var txn = ctx.Ide.PendingTransaction;
+                    ctx.Changed(new ChangeRecord
+                    {
+                        // without an open transaction afterwards there is nothing to roll back (no change, or committed inside)
+                        Kind = rewindable && txn != null ? ChangeRecord.Data : ChangeRecord.NotUndoable,
+                        Label = RunQueryTool.OneLine(sql), Savepoint = savepoint, TransactionId = txn,
+                    });
+                }
             }
             var backup = pending.Select(p => p.Backup).FirstOrDefault(b => b != null);
             var sb = new StringBuilder();

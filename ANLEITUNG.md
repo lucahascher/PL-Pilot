@@ -57,8 +57,9 @@ Dateien und Packages/Prozeduren/Views in der Datenbank (auch neu angelegte oder 
 an einem einzelnen Schritt macht diesen und alle späteren Schritte rückgängig. Vorher wird angezeigt, was passiert.
 Mit **Rückgängig machen und Nachricht bearbeiten** verschwindet der Chat ab dieser Stelle und die Nachricht steht
 wieder im Eingabefeld. Was Sie oder andere danach selbst geändert haben, wird nicht überschrieben (wird übersprungen
-und angezeigt). Datenänderungen (INSERT/UPDATE/DELETE) und sonstiges DDL lassen sich nicht automatisch
-zurücknehmen. Die Informationen gelten, bis PL/SQL Developer geschlossen wird.
+und angezeigt). Noch nicht festgeschriebene Datenänderungen (INSERT/UPDATE/DELETE) werden ebenfalls
+zurückgenommen; nach einem Commit – auch dem automatischen durch DDL wie CREATE OR REPLACE – geht das nicht mehr,
+ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer geschlossen wird.
 
 ## Sicherheit
 
@@ -70,6 +71,10 @@ zurücknehmen. Die Informationen gelten, bis PL/SQL Developer geschlossen wird.
   Er führt kein `COMMIT` aus, wenn Sie es nicht ausdrücklich verlangen. Seine Abfragen laufen im Hintergrund:
   PL/SQL Developer bleibt auch bei langen Abfragen bedienbar. **Stoppen** (Esc) beendet das Warten sofort; eine
   bereits laufende Anweisung kann ein Plug-in aber nicht abbrechen – sie läuft in der Sitzung des Agents zu Ende.
+- **Nicht festgeschriebene Änderungen:** Datenänderungen des Agents (INSERT/UPDATE/DELETE) werden nicht automatisch
+  festgeschrieben. Solange es welche gibt, erscheint über dem Eingabefeld ein Hinweis mit den Anweisungen und den
+  Schaltflächen **Commit** und **Rollback**. Beim Schließen von PL/SQL Developer fragt PL/Pilot, ob sie
+  festgeschrieben oder verworfen werden sollen.
 - **DBA-Views verwenden** (Einstellungen → Sicherheit): Alle Abfragen des Agents lesen `DBA_TABLES`,
   `DBA_OBJECTS` … statt der `ALL_`-Views – auch die Abfragen, die das Modell selbst schreibt. Benötigt die Rolle
   `SELECT_CATALOG_ROLE`; ohne sie werden automatisch die `ALL_`-Views verwendet.

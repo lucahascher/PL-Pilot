@@ -330,18 +330,45 @@ namespace PlsqlDevAgent.Ide
         public ExecResult Execute(string sql)
         {
             RequireRepresentable(sql, "statement");
-            return RunSql(sql, () =>
+            string transaction = null;
+            var result = RunSql(sql, () =>
             {
                 int rc;
                 using (var s = new NativeString(sql)) rc = SQL_Execute(s.Ptr);
-                var result = new ExecResult { ErrorCode = rc };
-                if (rc != 0) result.ErrorMessage = Str(SQL_ErrorMessage());
-                if (SQL_GetDBMSGetOutput != null) result.DbmsOutput = Str(SQL_GetDBMSGetOutput());
-                return result;
+                var r = new ExecResult { ErrorCode = rc };
+                if (rc != 0) r.ErrorMessage = Str(SQL_ErrorMessage());
+                if (SQL_GetDBMSGetOutput != null) r.DbmsOutput = Str(SQL_GetDBMSGetOutput());
+                transaction = ReadTransaction();
+                return r;
             });
+            SetTransaction(transaction);
+            return result;
         }
 
         public bool IsExecutingSql => SqlThread.IsBusy;
+
+        private volatile string _transaction;
+        public string PendingTransaction => _transaction;
+        public event Action TransactionChanged;
+        public bool UsesOwnSession => !_sessionReady ? UseSeparateSession : _ownSession;
+
+        /// <summary>Id of the open transaction of the plug-in's session (dbms_transaction needs no extra privileges); null if none.</summary>
+        private static string ReadTransaction()
+        {
+            using (var s = new NativeString("select dbms_transaction.local_transaction_id from dual"))
+                if (SQL_Execute(s.Ptr) != 0) return null;
+            if (SQL_Eof() != 0) return null;
+            var id = Str(SQL_Field(0));
+            return string.IsNullOrWhiteSpace(id) ? null : id.Trim();
+        }
+
+        private void SetTransaction(string id)
+        {
+            if (_transaction == id) return;
+            _transaction = id;
+            Util.Log.Info(id == null ? "Agent session: no open transaction" : "Agent session: open transaction " + id);
+            try { TransactionChanged?.Invoke(); } catch (Exception ex) { Util.Log.Error("TransactionChanged handler failed", ex); }
+        }
 
         public void RefreshObject(string objectType, string owner, string name, int action) => MainThread.Invoke(() =>
         {
@@ -376,7 +403,14 @@ namespace PlsqlDevAgent.Ide
             return new PopupObject { ObjectType = Str(t), Owner = Str(o), Name = Str(n), SubObject = Str(s) };
         });
 
-        public void ResetSession() => _sessionReady = false;
+        /// <summary>Connection changed or the session setting was switched: the next statement sets up the session again.</summary>
+        public void ResetSession()
+        {
+            _sessionReady = false;
+            if (_transaction != null)
+                Util.Log.Warn("The agent's session was reset (connection change / setting) while transaction " + _transaction + " was open");
+            SetTransaction(null);
+        }
 
         // ---- SQL execution ----
 
