@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>PlsqlDevAgent.Harness</AssemblyName>
+    <RootNamespace>PlsqlDevAgent.Harness</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PlsqlDevAgent.Core\PlsqlDevAgent.Core.csproj" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+  <!-- WebView2Loader.dll next to the exe (the plug-in build copies it the same way). -->
+  <Target Name="CopyWebView2Loader" AfterTargets="Build">
+    <Copy SourceFiles="$(OutDir)runtimes\win-x64\native\WebView2Loader.dll" DestinationFolder="$(OutDir)" Condition="Exists('$(OutDir)runtimes\win-x64\native\WebView2Loader.dll')" />
+  </Target>
+
+</Project>

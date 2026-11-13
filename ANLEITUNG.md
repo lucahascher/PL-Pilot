@@ -1,0 +1,107 @@
+# PL/Pilot – Kurzanleitung
+
+PL/Pilot ist der KI-Copilot direkt in PL/SQL Developer. Er liest und bearbeitet Ihre
+Editorfenster, untersucht die Datenbank (Tabellen, Packages, Quelltexte), führt Abfragen aus, kompiliert
+PL/SQL und behebt Kompilierfehler. **Jede Änderung braucht Ihre Zustimmung.**
+
+Er arbeitet mit unserem eigenen, intern betriebenen Sprachmodell – es verlassen keine Daten das Firmennetz.
+
+## Installation (ohne Administratorrechte)
+
+1. `PLPilot.zip` entpacken.
+2. Rechtsklick auf `install.ps1` → *Mit PowerShell ausführen*
+   (oder: `powershell -ExecutionPolicy Bypass -File .\install.ps1`).
+   Das Plug-in wird nach `%LOCALAPPDATA%\PlsqlDevAgent\PlugIns` kopiert.
+3. PL/SQL Developer starten: **Konfigurieren → Einstellungen → Optionen** (je nach Version *Verzeichnisse*) →
+   **Plug-Ins-Verzeichnis** auf den vom Skript angezeigten Ordner setzen, PL/SQL Developer neu starten.
+4. Unter **Konfigurieren → Plug-Ins** erscheint *PL/Pilot*; im Register **Plug-Ins** gibt es die
+   Gruppe **PL-Pilot** (im Menüband steht ein Bindestrich, ein „/“ ist dort nicht möglich).
+
+## Einrichtung
+
+**Plug-Ins → PL-Pilot → Einstellungen**:
+
+- **Basis-URL** und **Modell** unseres LLM-Servers eintragen, **Testen** klicken, **Speichern**.
+- **Sprache**: *Automatisch* übernimmt die Sprache von PL/SQL Developer bzw. Windows; *Deutsch* erzwingt Deutsch.
+  Die Menüs von PL/SQL Developer wechseln nach einem Neustart.
+
+## Bedienung
+
+| Was | Wie |
+|---|---|
+| Chat öffnen | Plug-Ins → PL-Pilot → **Chat** |
+| Zu markiertem Code fragen | Code markieren → **Zur Auswahl fragen** oder Rechtsklick im Editor → **PL/Pilot fragen** |
+| Zu einem Datenbankobjekt fragen | Rechtsklick im Objekt-Browser → **PL/Pilot zu diesem Objekt fragen** |
+| Befehle | `/` tippen: `/explain`, `/review`, `/document`, `/test`, `/optimize`, `/fix`, `/compact`, `/new`, `/help` |
+| Objekte oder Dateien anhängen | `@` tippen, z. B. `@PKG_AUFTRAG` – Quelltext bzw. Tabellenbeschreibung wird mitgeschickt |
+| Frühere Eingaben | `↑` / `↓` im leeren Eingabefeld |
+| Gespeicherte Chats | Uhr-Symbol im Chat-Kopf |
+
+**Größere Aufgaben:** Der Agent schreibt sich eine **Aufgabenliste** (über dem Eingabefeld sichtbar) und
+arbeitet sie selbstständig ab. Im **Plan-Modus** (Schalter *Agent / Plan* im Eingabefeld) untersucht er nur
+und schlägt einen Plan vor; **Plan ausführen** setzt ihn um. Für breite Recherchen startet er
+**Hilfsagenten** (`run_subtask`); mehrere davon laufen gleichzeitig. Unter **Einstellungen → Agent → Modell für
+Teilaufgaben** kann ein kleineres, schnelleres Modell für die Hilfsagenten eingetragen werden.
+
+**Zustimmungen:** Vor jeder Änderung erscheint eine Karte mit Diff bzw. SQL:
+**Zulassen**, **Immer zulassen** (für diesen Chat), **Diff öffnen** (Vergleichsfenster von PL/SQL Developer)
+oder **Ablehnen** – optional mit einer Rückmeldung an den Agent.
+
+**Rückgängig:** Jede Editor- oder Dateiänderung hat eine Schaltfläche **Rückgängig**. Bevor der Agent ein
+Package, eine Prozedur, Funktion, einen Trigger, Typ oder View ersetzt oder löscht, wird die bisherige
+Datenbankversion gesichert – **Vorherige Version wiederherstellen** spielt sie zurück.
+
+**Zurückspulen:** Merkt man erst am Ende, dass etwas nicht stimmt, macht das Uhr-Symbol an einer eigenen
+Nachricht (erscheint beim Darüberfahren) **alle Änderungen seit dieser Nachricht** rückgängig – Editorfenster,
+Dateien und Packages/Prozeduren/Views in der Datenbank (auch neu angelegte oder gelöschte). **Ab hier rückgängig**
+an einem einzelnen Schritt macht diesen und alle späteren Schritte rückgängig. Vorher wird angezeigt, was passiert.
+Mit **Rückgängig machen und Nachricht bearbeiten** verschwindet der Chat ab dieser Stelle und die Nachricht steht
+wieder im Eingabefeld. Was Sie oder andere danach selbst geändert haben, wird nicht überschrieben (wird übersprungen
+und angezeigt). Datenänderungen (INSERT/UPDATE/DELETE) und sonstiges DDL lassen sich nicht automatisch
+zurücknehmen. Die Informationen gelten, bis PL/SQL Developer geschlossen wird.
+
+## Sicherheit
+
+- **Geschützte Verbindungen:** Auf Verbindungen, deren Name zu einem Muster passt (Standard `*PROD*;*PRD*`),
+  darf der Agent nur lesen. Das Schild-Symbol im Chat-Kopf zeigt das an; ein Klick erlaubt Änderungen nur für
+  die laufende Sitzung. Jede andere Verbindung lässt sich mit dem Schloss-Symbol sperren.
+- `DROP`, `DELETE` und `TRUNCATE` werden immer einzeln abgefragt.
+- Der Agent arbeitet in einer **eigenen Datenbanksitzung** und berührt Ihre offene Transaktion nicht.
+  Er führt kein `COMMIT` aus, wenn Sie es nicht ausdrücklich verlangen. Seine Abfragen laufen im Hintergrund:
+  PL/SQL Developer bleibt auch bei langen Abfragen bedienbar. **Stoppen** (Esc) beendet das Warten sofort; eine
+  bereits laufende Anweisung kann ein Plug-in aber nicht abbrechen – sie läuft in der Sitzung des Agents zu Ende.
+- **DBA-Views verwenden** (Einstellungen → Sicherheit): Alle Abfragen des Agents lesen `DBA_TABLES`,
+  `DBA_OBJECTS` … statt der `ALL_`-Views – auch die Abfragen, die das Modell selbst schreibt. Benötigt die Rolle
+  `SELECT_CATALOG_ROLE`; ohne sie werden automatisch die `ALL_`-Views verwendet.
+- Das Passwort der Verbindung wird nie gelesen.
+
+## Firmenregeln und Konventionen
+
+Unter **Einstellungen → Anweisungen & Regeln**:
+
+- **Firmenregeln:** Markdown-Datei oder -Ordner mit unseren Namens- und Programmierkonventionen (z. B. auf
+  dem Netzlaufwerk). **Bearbeiten…** legt eine Datei aus einer Vorlage an. Zusätzlich werden alle `*.md`-Dateien
+  im Ordner `PlugIns\PlsqlDevAgent\rules` geladen.
+- **System-Prompt:** die Grundanweisungen des Agents; anpassbar, **Auf Standard zurücksetzen** stellt sie wieder her.
+- **Persönliche Anweisungen:** eigene Ergänzungen.
+- `AGENTS.md` im Projektordner: Regeln für ein bestimmtes Projekt.
+- **Vollständigen System-Prompt anzeigen** zeigt, was das Modell tatsächlich erhält.
+
+## HTTPS
+
+Die Basis-URL darf mit `https://` beginnen. In der URL den Servernamen verwenden, für den das Zertifikat ausgestellt
+ist (nicht die IP-Adresse). Lehnt der Verbindungstest das Zertifikat ab, steht in der Meldung der Grund und – falls
+das Firmen-Stammzertifikat auf dem PC fehlt – ein Fingerabdruck. Nach Rücksprache mit der IT kann er unter
+**Einstellungen → Server: Vertrauenswürdige Zertifikate** eingetragen werden (keine Administratorrechte nötig).
+
+## Hilfe bei Problemen
+
+- **Einstellungen → Log öffnen** zeigt die Protokolldatei (`%LOCALAPPDATA%\PlsqlDevAgent\agent.log`).
+- Chat bleibt leer: Die *Microsoft Edge WebView2 Runtime* fehlt – bitte die IT ansprechen.
+- „Server nicht erreichbar“: Basis-URL prüfen und **Testen** klicken; ggf. *System-Proxy verwenden* ausschalten.
+- Sonderzeichen: Umlaute, ß, € und typografische Zeichen funktionieren. Zeichen außerhalb des Windows-Zeichensatzes
+  (z. B. „Ł“) kann PL/SQL Developer nicht an Plug-ins übergeben. Pfeile u. Ä. ersetzt PL/Pilot automatisch (→ wird ->),
+  andere lehnt es ab, statt sie zu „?“ zu verfälschen. Enthält ein Editor solche Zeichen, ändert PL/Pilot ihn nicht.
+
+---
+Erstellt von Luca Hascher.
