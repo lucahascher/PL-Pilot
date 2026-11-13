@@ -533,13 +533,16 @@ namespace PlsqlDevAgent.Agent.Tools
                            "Use execute_sql for other statements. Offending part starts with: " + RunQueryTool.OneLine(p);
             }
 
-            if (!ctx.Config.AutoApproveSql)
+            var sensitive = parts.Select(SensitiveUnitReason).FirstOrDefault(r => r != null);
+            if (!ctx.Config.AutoApproveSql || sensitive != null)
             {
                 var approval = await ctx.ApproveAsync(new ApprovalRequest
                 {
-                    Category = "sql",
+                    Category = sensitive != null ? "sql-destructive" : "sql",
                     Title = L.T("Compile into database ({0}): {1}", ctx.Ide.GetContext().ConnectionLabel, Summarize(args)),
                     Detail = source.Replace("\r\n", "\n"),
+                    Warning = sensitive != null ? L.T(sensitive) : null,
+                    AlwaysAsk = sensitive != null,
                 });
                 if (!approval.Approved) return approval.RejectionMessage;
             }
@@ -609,34 +612,39 @@ namespace PlsqlDevAgent.Agent.Tools
             @"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NO\s+)?FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?VIEW\s+(?:(?<o>""[^""]+""|[\w$#]+)\s*\.\s*)?(?<n>""[^""]+""|[\w$#]+)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-        private static readonly Regex Destructive = new Regex(
-            @"^\s*(DROP|TRUNCATE|DELETE|ALTER\s+\w+\s+\S+\s+DROP|PURGE|FLASHBACK)\b|\bDELETE\s+FROM\b|\bDROP\s+(TABLE|USER|TABLESPACE|PACKAGE|PROCEDURE|FUNCTION|VIEW|INDEX|SEQUENCE|TYPE|TRIGGER|SYNONYM)\b",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
         public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
             var sql = PrepareStatement(ReqStr(args, "sql"));
             if (sql.Length == 0) return "Nothing to execute.";
             var kw = FirstKeyword(sql);
-            bool isQuery = kw == "SELECT" || kw == "WITH";
-            bool destructive = Destructive.IsMatch(StripLeadingComments(sql));
+            bool returnsRows = kw == "SELECT" || kw == "WITH";
+            // only a plain query skips the approval: a "query" with PL/SQL in its WITH clause can change and commit data
+            bool readOnlyQuery = returnsRows && IsReadOnlyQuery(sql, out _);
+            var sensitive = readOnlyQuery ? null : SensitiveReason(sql);
 
-            if (!isQuery && (!ctx.Config.AutoApproveSql || destructive))
+            if (!readOnlyQuery && (!ctx.Config.AutoApproveSql || sensitive != null))
             {
                 var purpose = Str(args, "purpose");
                 var approval = await ctx.ApproveAsync(new ApprovalRequest
                 {
-                    Category = destructive ? "sql-destructive" : "sql",
+                    Category = sensitive != null ? "sql-destructive" : "sql",
                     Title = L.T("Execute in database ({0})", ctx.Ide.GetContext().ConnectionLabel) + (string.IsNullOrWhiteSpace(purpose) ? "" : ": " + purpose),
                     Detail = sql.Replace("\r\n", "\n"),
-                    Warning = destructive ? L.T("This statement drops, truncates or deletes data/objects.") : null,
+                    Warning = sensitive != null ? L.T(sensitive) : null,
+                    AlwaysAsk = sensitive != null,
                 });
                 if (!approval.Approved) return approval.RejectionMessage;
             }
 
-            if (isQuery)
+            if (returnsRows)
             {
                 var r = ctx.Ide.Query(sql, Math.Min(50, ctx.Config.MaxQueryRows));
+                if (!readOnlyQuery)
+                {
+                    // may have changed data (WITH FUNCTION, FOR UPDATE): refresh the transaction state, list it for rewind
+                    ctx.Ide.Execute("begin null; end;");
+                    ctx.Changed(new ChangeRecord { Kind = ChangeRecord.NotUndoable, Label = RunQueryTool.OneLine(sql), TransactionId = ctx.Ide.PendingTransaction });
+                }
                 return FormatResult(r, ctx.Config.MaxToolOutputChars);
             }
 

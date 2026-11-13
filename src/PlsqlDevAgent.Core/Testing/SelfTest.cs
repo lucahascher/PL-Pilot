@@ -34,13 +34,48 @@ namespace PlsqlDevAgent.Testing
             _dir = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST");
             Directory.CreateDirectory(_dir);
             var mode = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PROMPT");
-            if (mode == "ENC-ONLY") _ = EncodingRunAsync(plugin);
-            else if (mode == "SQL-ONLY") _ = SqlRunAsync(plugin);
-            else if (mode == "REWIND-ONLY") _ = SqlRunAsync(plugin, rewindOnly: true);
-            else if (mode == "HTTPS-ONLY") _ = HttpsRunAsync();
-            else if (mode == "TXN-ONLY") _ = SqlRunAsync(plugin, transactionOnly: true);
-            else if (mode == "TXN-CLOSE") _ = CloseWithTransactionAsync(plugin);
-            else _ = RunAsync(plugin);
+            if (mode == "HTTPS-ONLY") { _ = HttpsRunAsync(); return; } // no database access
+            _ = StartOnConfirmedConnection(plugin, mode);
+        }
+
+        private static async Task StartOnConfirmedConnection(Plugin plugin, string mode)
+        {
+            if (!await ConfirmTestConnection(plugin.Ide)) return;
+            if (mode == "ENC-ONLY") await EncodingRunAsync(plugin);
+            else if (mode == "SQL-ONLY") await SqlRunAsync(plugin);
+            else if (mode == "REWIND-ONLY") await SqlRunAsync(plugin, rewindOnly: true);
+            else if (mode == "TXN-ONLY") await SqlRunAsync(plugin, transactionOnly: true);
+            else if (mode == "TXN-CLOSE") await CloseWithTransactionAsync(plugin);
+            else if (mode == "SEC-ONLY") await SqlRunAsync(plugin, securityOnly: true);
+            else await RunAsync(plugin);
+        }
+
+        /// <summary>
+        /// The self test creates, changes and drops objects (EMP, DEPT, packages, procedures) in the connected schema.
+        /// It only runs when PLSQLDEVAGENT_AUTOTEST_CONNECTION names exactly the connection it is allowed to use
+        /// (USER@DATABASE as in the chat header) and that connection is not protected; otherwise nothing happens.
+        /// </summary>
+        private static async Task<bool> ConfirmTestConnection(IIde ide)
+        {
+            for (int i = 0; i < 120 && !ide.GetContext().Connected; i++) await Task.Delay(500);
+            var c = ide.GetContext();
+            var label = $"{c.User}@{c.Database}";
+            var allowed = (Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_CONNECTION") ?? "").Trim();
+            string refusal = null;
+            if (!c.Connected) refusal = "PL/SQL Developer is not logged on";
+            else if (allowed.Length == 0) refusal = "PLSQLDEVAGENT_AUTOTEST_CONNECTION is not set";
+            else if (!string.Equals(allowed, label, StringComparison.OrdinalIgnoreCase)) refusal = $"logged on as {label}, but PLSQLDEVAGENT_AUTOTEST_CONNECTION is {allowed}";
+            else
+            {
+                var identity = await Task.Run(() => ide.DatabaseIdentity);
+                var pattern = ConnectionGuard.MatchingPattern(AgentConfig.Load().ProtectedConnections, c, identity);
+                if (pattern != null) refusal = $"the connection is protected (pattern {pattern})";
+            }
+            if (refusal == null) return true;
+            Log.Warn("Self test NOT started: " + refusal + ". It creates and drops objects in the connected schema.");
+            Line("# PL/Pilot self test – REFUSED\n" + refusal);
+            try { File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8); } catch { }
+            return false;
         }
 
         /// <summary>
@@ -130,13 +165,14 @@ namespace PlsqlDevAgent.Testing
         }
 
         /// <summary>Only the background SQL / Stop / DBA views checks (quick run).</summary>
-        private static async Task SqlRunAsync(Plugin plugin, bool rewindOnly = false, bool transactionOnly = false)
+        private static async Task SqlRunAsync(Plugin plugin, bool rewindOnly = false, bool transactionOnly = false, bool securityOnly = false)
         {
             try
             {
                 Line("# PL/Pilot – background SQL self test");
                 for (int i = 0; i < 120 && !plugin.Ide.GetContext().Connected; i++) await Task.Delay(500);
-                if (transactionOnly) await TransactionChecks(plugin.Ide, AgentConfig.Load());
+                if (securityOnly) await SecurityChecks(plugin.Ide, AgentConfig.Load());
+                else if (transactionOnly) await TransactionChecks(plugin.Ide, AgentConfig.Load());
                 else if (rewindOnly) await RewindChecks(plugin.Ide, AgentConfig.Load());
                 else await SqlThreadChecks(plugin.Ide, AgentConfig.Load());
                 Line($"\n**Total: {_pass} passed, {_fail} failed**");
@@ -303,6 +339,76 @@ namespace PlsqlDevAgent.Testing
                 ide.TransactionChanged -= onChange;
                 if (ide.PendingTransaction != null) await Task.Run(() => ide.Execute("rollback")); // never leave the close dialog to the test
             }
+        }
+
+        /// <summary>
+        /// Security fixes against the real database: a "query" with WITH FUNCTION cannot change data unasked, statements
+        /// that hide deletions in PL/SQL and logon triggers always ask (also with auto-approve), and the production
+        /// guard recognizes the database by its own name.
+        /// </summary>
+        private static async Task SecurityChecks(IIde ide, AgentConfig cfg)
+        {
+            Line("\n## 11. Security");
+            await Task.Delay(200);
+            var plain = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+            var requests = new System.Collections.Generic.List<ApprovalRequest>();
+            bool approve = false;
+            var auto = cfg.Clone();
+            auto.AutoApproveSql = true; // the checks must also hold with "Auto approve SQL"
+            var ctx = new ToolContext
+            {
+                Ide = ide, Config = auto,
+                RequestApproval = r => { requests.Add(r); return Task.FromResult(approve ? ApprovalResult.Yes() : new ApprovalResult { Approved = false, Feedback = "rejected by the self test" }); },
+            };
+            async Task<int> ProbeRows() => int.Parse((await Task.Run(() => ide.Query("select count(*) from pda_sec_probe", 1))).Rows[0][0]);
+
+            await Tool(plain, "execute_sql", new JObject { ["sql"] = "begin execute immediate 'drop table pda_sec_probe purge'; exception when others then null; end;" }, null);
+            await Tool(plain, "execute_sql", new JObject { ["sql"] = "create table pda_sec_probe (n number)" }, "Executed successfully");
+            try
+            {
+                const string withFunction = "with function pda_w return number is pragma autonomous_transaction; begin insert into pda_sec_probe values (1); commit; return 1; end; " +
+                                            "select pda_w from dual";
+                await Tool(ctx, "run_query", new JObject { ["sql"] = withFunction }, "Not executed");
+                Check("run_query refuses WITH FUNCTION without asking anything", requests.Count == 0 && await ProbeRows() == 0);
+
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = withFunction }, "rejected");
+                Check("execute_sql: WITH FUNCTION asks despite auto-approve (always ask, warning)",
+                    requests.Count == 1 && requests[0].AlwaysAsk && (requests[0].Warning ?? "").Length > 0);
+                Check("rejected: the hidden INSERT was not executed", await ProbeRows() == 0);
+                approve = true;
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = withFunction }, "PDA_W");
+                Check("approved: the query runs", requests.Count == 2 && await ProbeRows() == 1);
+
+                approve = false;
+                requests.Clear();
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = "begin delete from pda_sec_probe; end;" }, "rejected");
+                Check("DELETE inside a PL/SQL block asks despite auto-approve, nothing deleted", requests.Count == 1 && requests[0].AlwaysAsk && await ProbeRows() == 1);
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = "begin execute immediate 'trun' || 'cate table pda_sec_probe'; end;" }, "rejected");
+                Check("dynamic SQL asks despite auto-approve, nothing truncated", requests.Count == 2 && await ProbeRows() == 1);
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = "insert into pda_sec_probe values (2)" }, "Executed successfully");
+                Check("a normal INSERT runs without asking with auto-approve", requests.Count == 2 && await ProbeRows() == 2);
+                await Task.Run(() => ide.Execute("rollback"));
+
+                await Tool(ctx, "compile_plsql", new JObject { ["source"] = "create or replace trigger pda_sec_logon after logon on schema\nbegin\n  null;\nend;" }, "rejected");
+                var trigger = await Task.Run(() => ide.Query("select count(*) from user_triggers where trigger_name = 'PDA_SEC_LOGON'", 1));
+                Check("a logon trigger asks despite auto-approve and is not created when rejected", requests.Count == 3 && requests[2].AlwaysAsk && trigger.Rows[0][0] == "0");
+            }
+            finally
+            {
+                await Tool(plain, "execute_sql", new JObject { ["sql"] = "drop table pda_sec_probe purge" }, null);
+            }
+
+            // production guard: the database's own name protects it, whatever the logon text says
+            var identity = await Task.Run(() => ide.DatabaseIdentity);
+            Line("Database identity: " + identity);
+            var c = ide.GetContext();
+            var dbName = (identity ?? "").Split('|')[0];
+            var gcfg = cfg.Clone();
+            gcfg.ProtectedConnections = dbName;
+            var protectedState = new ConnectionGuard().Evaluate(gcfg, c, identity);
+            Line("Guard: " + protectedState.Describe());
+            Check($"guard: the pattern '{dbName}' (database name) protects {c.ConnectionLabel}",
+                dbName.Length > 0 && protectedState.Mode == GuardMode.Protected && new ConnectionGuard().Evaluate(gcfg, c).Mode == GuardMode.Normal);
         }
 
         /// <summary>A statement that runs <paramref name="seconds"/> seconds in the database.</summary>
@@ -550,6 +656,7 @@ namespace PlsqlDevAgent.Testing
                 await SqlThreadChecks(ide, cfg);
                 await RewindChecks(ide, cfg);
                 await TransactionChecks(ide, cfg);
+                await SecurityChecks(ide, cfg);
                 Line($"\n**Tool tests: {_pass} passed, {_fail} failed**");
 
                 var prompt = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PROMPT");

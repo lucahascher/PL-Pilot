@@ -50,8 +50,6 @@ namespace PlsqlDevAgent.UI
         private DateTime _chatCreated = DateTime.Now;
 
         // prompt history (arrow-up in the input box)
-        private static string PromptFile => Path.Combine(Log.Directory, "prompts.json");
-        private readonly List<string> _prompts = LoadPrompts();
 
         public bool IsBusy => _session.IsBusy;
 
@@ -63,6 +61,7 @@ namespace PlsqlDevAgent.UI
             _session = new AgentSession(ide, this, _config);
             _session.Journal = ChangeJournal.For(_chatId);
             _ide.TransactionChanged += OnTransactionChanged;
+            _ide.DatabaseIdentityChanged += OnDatabaseIdentityChanged;
 
             Text = "PL/Pilot";
             StartPosition = FormStartPosition.Manual;
@@ -140,6 +139,7 @@ namespace PlsqlDevAgent.UI
             try { SaveBounds(); } catch { }
             try { SaveChat(); } catch { }
             try { _ide.TransactionChanged -= OnTransactionChanged; } catch { }
+            try { _ide.DatabaseIdentityChanged -= OnDatabaseIdentityChanged; } catch { }
             try { _session.Dispose(); } catch { }
             try { Close(); Dispose(); } catch { }
         }
@@ -240,12 +240,20 @@ namespace PlsqlDevAgent.UI
             _fallback.Visible = true;
         }
 
+        /// <summary>The page with a fresh Content-Security-Policy nonce: only its own script tag may run.</summary>
         private static string LoadHtml()
         {
+            string html;
             using (var s = typeof(ChatForm).Assembly.GetManifestResourceStream("web/index.html"))
             using (var r = new StreamReader(s))
-                return r.ReadToEnd();
+                html = r.ReadToEnd();
+            var nonce = new byte[18];
+            using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create()) rng.GetBytes(nonce);
+            return html.Replace("__CSP_NONCE__", Convert.ToBase64String(nonce));
         }
+
+        /// <summary>Address of our page; messages from anything else (it cannot navigate, but to be sure) are ignored.</summary>
+        private string _pageSource;
 
         /// <summary>Sends a message to the page; record = keep it for the saved chat.</summary>
         private void Post(JObject message, bool record = true)
@@ -268,6 +276,8 @@ namespace PlsqlDevAgent.UI
         {
             using (Fpu.Mask())
             {
+                if (_pageSource == null) _pageSource = e.Source;
+                else if (e.Source != _pageSource) { Log.Warn("Ignored a web message from " + e.Source); return; }
                 JObject msg;
                 try { msg = JObject.Parse(e.WebMessageAsJson); }
                 catch { return; }
@@ -298,7 +308,7 @@ namespace PlsqlDevAgent.UI
                         ["needsSetup"] = !File.Exists(AgentConfig.FilePath),
                         ["config"] = _config.ToUiJson(),
                         ["commands"] = CommandsJson(),
-                        ["prompts"] = new JArray(_prompts),
+                        ["prompts"] = new JArray(PromptHistory.Texts(_config)),
                         ["guard"] = GuardJson(),
                         ["usage"] = _lastUsage,
                     }, false);
@@ -440,6 +450,10 @@ namespace PlsqlDevAgent.UI
                 case "open_backups":
                     Directory.CreateDirectory(BackupStore.Directory);
                     Process.Start("explorer.exe", "\"" + BackupStore.Directory + "\"");
+                    break;
+
+                case "delete_history":
+                    DeleteHistory();
                     break;
 
                 case "get_settings":
@@ -590,20 +604,7 @@ namespace PlsqlDevAgent.UI
         private JArray CommandsJson() =>
             new JArray(Commands.All(_config).Select(c => new JObject { ["name"] = c.Name, ["description"] = L.T(c.Description ?? ""), ["kind"] = c.Kind }));
 
-        private void RememberPrompt(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return;
-            _prompts.Remove(text);
-            _prompts.Add(text);
-            while (_prompts.Count > 200) _prompts.RemoveAt(0);
-            try { File.WriteAllText(PromptFile, JsonConvert.SerializeObject(_prompts), Encoding.UTF8); } catch { }
-        }
-
-        private static List<string> LoadPrompts()
-        {
-            try { return File.Exists(PromptFile) ? JsonConvert.DeserializeObject<List<string>>(File.ReadAllText(PromptFile, Encoding.UTF8)) ?? new List<string>() : new List<string>(); }
-            catch { return new List<string>(); }
-        }
+        private void RememberPrompt(string text) => PromptHistory.Remember(text, _config);
 
         // ------------------------------------------------------------------ editor actions from the chat
 
@@ -710,6 +711,9 @@ namespace PlsqlDevAgent.UI
         // ------------------------------------------------------------------ uncommitted changes of the agent's session
 
         private void OnTransactionChanged() => Post(TransactionJson(), false);
+
+        /// <summary>The guard badge may change once the database's own names are known.</summary>
+        private void OnDatabaseIdentityChanged() => MainThread.Post(UpdateContext);
 
         private JObject TransactionJson()
         {
@@ -921,8 +925,30 @@ namespace PlsqlDevAgent.UI
                     Checkpoints = _session.ExportCheckpoints(),
                 };
             }
-            try { ChatStore.Save(record); }
+            if (!_config.SaveChatHistory) return; // history switched off: nothing is written to disk
+            try
+            {
+                ChatStore.Save(LocalData.ForStorage(record, _config));
+                if (_config.ChatRetentionDays > 0) ChatStore.DeleteOlderThan(DateTime.Now.AddDays(-_config.ChatRetentionDays));
+            }
             catch (Exception ex) { Log.Warn("Saving chat failed: " + ex.Message); }
+        }
+
+        /// <summary>"Delete saved chats now" (settings): all saved chats and the prompt history.</summary>
+        private void DeleteHistory()
+        {
+            Task.Run(() =>
+            {
+                int count = 0;
+                try
+                {
+                    count = ChatStore.DeleteAll();
+                    PromptHistory.Delete();
+                    Log.Info($"User deleted the saved chats ({count}) and the prompt history");
+                }
+                catch (Exception ex) { Log.Warn("Deleting the saved chats failed: " + ex.Message); }
+                Post(new JObject { ["type"] = "history_deleted", ["text"] = L.T("{0} saved chat(s) and the prompt history were deleted.", count) }, false);
+            });
         }
 
         private void NewChat()
@@ -942,7 +968,7 @@ namespace PlsqlDevAgent.UI
                 ["id"] = h.Id, ["title"] = h.Title, ["updated"] = h.Updated.ToString("yyyy-MM-dd HH:mm"),
                 ["connection"] = h.Connection, ["messages"] = h.Messages,
             }));
-            Post(new JObject { ["type"] = "chats", ["items"] = items, ["current"] = _chatId }, false);
+            Post(new JObject { ["type"] = "chats", ["items"] = items, ["current"] = _chatId, ["disabled"] = !_config.SaveChatHistory }, false);
         }
 
         private void OpenChat(string id)
@@ -985,8 +1011,17 @@ namespace PlsqlDevAgent.UI
             cfg.RequestTimeoutSeconds = Math.Max(30, cfg.RequestTimeoutSeconds);
             cfg.ContextWindowTokens = Math.Max(4096, cfg.ContextWindowTokens);
             cfg.CompactAtPercent = Math.Max(0, Math.Min(95, cfg.CompactAtPercent));
+            if (cfg.ChatHistoryContent != "full") cfg.ChatHistoryContent = "noResults";
+            cfg.ChatRetentionDays = Math.Max(0, Math.Min(3650, cfg.ChatRetentionDays));
+            cfg.BackupRetentionDays = Math.Max(0, Math.Min(3650, cfg.BackupRetentionDays));
+            cfg.LogRetentionDays = Math.Max(0, Math.Min(3650, cfg.LogRetentionDays));
+            bool historySwitchedOff = _config.SaveChatHistory && !cfg.SaveChatHistory;
             cfg.Save();
             _config = cfg;
+            // apply the local data settings right away (history off: saved chats and prompts are deleted)
+            Task.Run(() => LocalData.Cleanup(cfg));
+            if (historySwitchedOff)
+                Post(new JObject { ["type"] = "notice", ["text"] = L.T("Chat history is off: saved chats and the prompt history are deleted and nothing is saved any more.") }, false);
             _session.UpdateConfig(cfg);
             ApplyIdeSettings();
             Plugin.ApplyLanguage(_ide, cfg);
@@ -1194,6 +1229,7 @@ namespace PlsqlDevAgent.UI
                 ["warning"] = request.Warning,
                 ["language"] = request.DetailLanguage,
                 ["canDiffInIde"] = _ide.IsReal && _ide.CanShowDifferences && request.DiffLeftText != null,
+                ["alwaysAsk"] = request.AlwaysAsk,
             });
             MainThread.Post(() =>
             {

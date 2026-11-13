@@ -230,6 +230,8 @@ namespace PlsqlDevAgent.Agent
         public string PendingTransaction => _inner.PendingTransaction;
         public event Action TransactionChanged { add => _inner.TransactionChanged += value; remove => _inner.TransactionChanged -= value; }
         public bool UsesOwnSession => _inner.UsesOwnSession;
+        public string DatabaseIdentity => _inner.DatabaseIdentity;
+        public event Action DatabaseIdentityChanged { add => _inner.DatabaseIdentityChanged += value; remove => _inner.DatabaseIdentityChanged -= value; }
         public void RefreshObject(string objectType, string owner, string name, int action) => _inner.RefreshObject(objectType, owner, name, action);
         public void ShowDifferences(string caption1, string text1, string caption2, string text2) => _inner.ShowDifferences(caption1, text1, caption2, text2);
         public void SetStatus(string message) => _inner.SetStatus(message);

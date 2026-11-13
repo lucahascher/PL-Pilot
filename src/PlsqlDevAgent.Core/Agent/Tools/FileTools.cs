@@ -38,6 +38,31 @@ namespace PlsqlDevAgent.Agent.Tools
 
         private static readonly string[] SkipDirs = { ".git", ".svn", "node_modules", "bin", "obj", ".vs", ".idea" };
 
+        private static readonly string[] ConfigDirs = { ".git", ".svn", ".hg", ".github", ".gitlab", ".vscode", ".idea", ".vs", ".plsqlagent" };
+        private static readonly string[] AgentFiles = { "AGENTS.md", "PLSQL_AGENT.md", "CLAUDE.md", ".gitattributes", ".gitmodules" };
+        private static readonly string[] ExecutableExtensions =
+        {
+            ".bat", ".cmd", ".ps1", ".psm1", ".psd1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".exe", ".dll", ".com",
+            ".scr", ".msi", ".lnk", ".url", ".reg", ".cpl", ".jar", ".sh", ".py",
+        };
+
+        /// <summary>
+        /// Files whose change can run code or steer the agent (git hooks and config, IDE tasks, agent instructions and
+        /// commands, scripts): always shown for approval, also with "Auto approve file writes". Null = normal file.
+        /// </summary>
+        public static string SensitiveReason(string relativePath)
+        {
+            var parts = (relativePath ?? "").Split('\\', '/');
+            if (parts.Any(p => ConfigDirs.Contains(p, StringComparer.OrdinalIgnoreCase)))
+                return "This file belongs to the configuration of git, an IDE or the agent (e.g. git hooks run code on the next commit).";
+            var name = parts.Last();
+            if (AgentFiles.Contains(name, StringComparer.OrdinalIgnoreCase))
+                return "This file contains instructions for the agent or for git.";
+            if (ExecutableExtensions.Contains(Path.GetExtension(name), StringComparer.OrdinalIgnoreCase))
+                return "This is a script or program file that can run code.";
+            return null;
+        }
+
         public static IEnumerable<string> EnumerateFiles(string dir, string pattern, bool recursive)
         {
             IEnumerable<string> files;
@@ -251,11 +276,14 @@ namespace PlsqlDevAgent.Agent.Tools
         internal static async Task<string> Commit(ToolContext ctx, string path, string before, string after, Encoding enc)
         {
             var rel = Workspace.Relative(ctx, path);
-            if (!ctx.Config.AutoApproveFileWrites)
+            var sensitive = Workspace.SensitiveReason(rel);
+            if (!ctx.Config.AutoApproveFileWrites || sensitive != null)
             {
                 var approval = await ctx.ApproveAsync(new ApprovalRequest
                 {
                     Category = "file",
+                    Warning = sensitive != null ? L.T(sensitive) : null,
+                    AlwaysAsk = sensitive != null,
                     Title = L.T(before == null ? "Create file {0}" : "Modify file {0}", rel),
                     Diff = before == null ? null : LineDiff.Unified(before, after),
                     Detail = before == null ? after.Replace("\r\n", "\n") : null,

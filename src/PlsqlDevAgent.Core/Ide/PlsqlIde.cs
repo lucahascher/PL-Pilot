@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Threading;
 using PlsqlDevAgent.Native;
 using static PlsqlDevAgent.Native.Callbacks;
 
@@ -403,13 +404,64 @@ namespace PlsqlDevAgent.Ide
             return new PopupObject { ObjectType = Str(t), Owner = Str(o), Name = Str(n), SubObject = Str(s) };
         });
 
+        private volatile string _dbIdentity;
+        private int _dbIdentityLoading;
+        public event Action DatabaseIdentityChanged;
+
+        public string DatabaseIdentity
+        {
+            get
+            {
+                var known = _dbIdentity;
+                if (known != null) return known;
+                if (!MainThread.IsMainThread) return LoadDatabaseIdentity();
+                if (Interlocked.Exchange(ref _dbIdentityLoading, 1) == 0)
+                    System.Threading.Tasks.Task.Run(() =>
+                    {
+                        try { LoadDatabaseIdentity(); }
+                        finally { Interlocked.Exchange(ref _dbIdentityLoading, 0); }
+                    });
+                return null;
+            }
+        }
+
+        private string LoadDatabaseIdentity()
+        {
+            if (_dbIdentity != null) return _dbIdentity;
+            const string full = "select sys_context('USERENV','DB_NAME') || '|' || sys_context('USERENV','DB_UNIQUE_NAME') || '|' || " +
+                                "sys_context('USERENV','SERVICE_NAME') || '|' || sys_context('USERENV','CON_NAME') || '|' || " +
+                                "sys_context('USERENV','SERVER_HOST') || '|' || sys_context('USERENV','INSTANCE_NAME') from dual";
+            const string before12c = "select sys_context('USERENV','DB_NAME') || '|' || sys_context('USERENV','DB_UNIQUE_NAME') || '|' || " +
+                                     "sys_context('USERENV','SERVICE_NAME') || '|' || sys_context('USERENV','SERVER_HOST') || '|' || " +
+                                     "sys_context('USERENV','INSTANCE_NAME') from dual";
+            try
+            {
+                if (!MainThread.Invoke(() => IDE_Connected?.Invoke() != 0)) return null;
+                string identity;
+                try { identity = Query(full, 1).Rows[0][0]; }
+                catch (OracleSqlException) { identity = Query(before12c, 1).Rows[0][0]; } // CON_NAME exists since 12c
+                _dbIdentity = identity ?? "";
+                Util.Log.Info("Database identity: " + _dbIdentity);
+                try { DatabaseIdentityChanged?.Invoke(); } catch (Exception ex) { Util.Log.Error("DatabaseIdentityChanged handler failed", ex); }
+                return _dbIdentity;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                Util.Log.Warn("Could not read the database identity: " + ex.Message);
+                return null;
+            }
+        }
+
         /// <summary>Connection changed or the session setting was switched: the next statement sets up the session again.</summary>
         public void ResetSession()
         {
             _sessionReady = false;
+            _dbIdentity = null;
             if (_transaction != null)
                 Util.Log.Warn("The agent's session was reset (connection change / setting) while transaction " + _transaction + " was open");
             SetTransaction(null);
+            try { DatabaseIdentityChanged?.Invoke(); } catch (Exception ex) { Util.Log.Error("DatabaseIdentityChanged handler failed", ex); }
         }
 
         // ---- SQL execution ----

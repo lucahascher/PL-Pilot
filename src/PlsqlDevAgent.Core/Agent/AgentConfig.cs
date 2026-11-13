@@ -71,6 +71,18 @@ namespace PlsqlDevAgent.Agent
         public bool AutoApproveSql { get; set; } = false;
         public bool AutoApproveFileWrites { get; set; } = false;
 
+        // ---- local data (privacy / GDPR) ----
+        /// <summary>Save chats and the prompt history on this PC. Off: nothing is written; saved chats and prompts are deleted.</summary>
+        public bool SaveChatHistory { get; set; } = true;
+        /// <summary>"noResults": saved chats leave out tool results and attached contents; "full": everything.</summary>
+        public string ChatHistoryContent { get; set; } = "noResults";
+        /// <summary>Saved chats and prompt history entries older than this are deleted (0 = keep).</summary>
+        public int ChatRetentionDays { get; set; } = 30;
+        /// <summary>Source backups older than this are deleted (0 = keep).</summary>
+        public int BackupRetentionDays { get; set; } = 90;
+        /// <summary>Log entries older than this are deleted (0 = keep; the log is limited to 2 × 2 MB anyway).</summary>
+        public int LogRetentionDays { get; set; } = 30;
+
         // ---- UI ----
         public int WindowX { get; set; } = -1;
         public int WindowY { get; set; } = -1;

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 
 namespace PlsqlDevAgent.Util
 {
@@ -22,6 +23,24 @@ namespace PlsqlDevAgent.Util
 
         public static void Error(string message, Exception ex = null) =>
             Write("ERROR", ex == null ? message : message + ": " + ex);
+
+        /// <summary>Removes log entries written before <paramref name="cutoff"/> (retention setting).</summary>
+        public static void DeleteOlderThan(DateTime cutoff)
+        {
+            lock (Sync)
+            {
+                var old = FilePath + ".1";
+                if (File.Exists(old) && File.GetLastWriteTime(old) < cutoff) File.Delete(old);
+                if (!File.Exists(FilePath)) return;
+                var lines = File.ReadAllLines(FilePath);
+                int first = 0; // entries are chronological; lines without a time stamp belong to the entry above
+                while (first < lines.Length && !(lines[first].Length >= 19 &&
+                       DateTime.TryParseExact(lines[first].Substring(0, 19), "yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture,
+                           System.Globalization.DateTimeStyles.None, out var time) && time >= cutoff))
+                    first++;
+                if (first > 0) File.WriteAllLines(FilePath, lines.Skip(first));
+            }
+        }
 
         private static void Write(string level, string message)
         {

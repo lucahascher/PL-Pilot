@@ -27,7 +27,7 @@ $checker = Get-Command node, bun -ErrorAction SilentlyContinue | Select-Object -
 if ($checker) {
     Write-Host "== Checking the chat page script ($($checker.Name))" -ForegroundColor Cyan
     $html = [IO.File]::ReadAllText((Join-Path $root "src\PlsqlDevAgent.Core\UI\Web\index.html"), [Text.Encoding]::UTF8)
-    $js = ([regex]::Matches($html, '(?s)<script>(.*?)</script>') | ForEach-Object { $_.Groups[1].Value }) -join "`n"
+    $js = ([regex]::Matches($html, '(?s)<script[^>]*>(.*?)</script>') | ForEach-Object { $_.Groups[1].Value }) -join "`n"
     $jsFile = Join-Path $obj "page-check.js"
     [IO.File]::WriteAllText($jsFile, $js, (New-Object Text.UTF8Encoding($false)))
     $ErrorActionPreference = "Continue"

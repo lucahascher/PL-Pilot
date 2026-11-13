@@ -83,7 +83,9 @@ namespace PlsqlDevAgent.Agent
                 var key = cfg.UseSystemProxy + "|" + cfg.RequestTimeoutSeconds + "|" + cfg.TrustedCertificates;
                 if (_http != null && _httpKey == key) return _http;
                 // not disposed: a parallel request may still use the previous client; it is released by the GC
-                var handler = new HttpClientHandler { UseProxy = cfg.UseSystemProxy, UseDefaultCredentials = true };
+                // The Windows login goes to the company proxy only, never to the LLM server itself (it uses the API key):
+                // otherwise a server or an attacker in between could request NTLM/Kerberos authentication and capture it.
+                var handler = new HttpClientHandler { UseProxy = cfg.UseSystemProxy, UseDefaultCredentials = false };
                 if (cfg.UseSystemProxy) handler.DefaultProxyCredentials = CredentialCache.DefaultCredentials;
                 var pins = Certificates.ParseThumbprints(cfg.TrustedCertificates);
                 handler.ServerCertificateCustomValidationCallback = (request, cert, chain, errors) =>

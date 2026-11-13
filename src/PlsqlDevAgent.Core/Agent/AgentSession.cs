@@ -131,8 +131,15 @@ namespace PlsqlDevAgent.Agent
 
         public GuardState CurrentGuard()
         {
-            try { return Guard.Evaluate(Config, _ide.GetContext()); }
-            catch { return new GuardState { Mode = Config.ReadOnlyMode ? GuardMode.ReadOnlySetting : GuardMode.Normal }; }
+            try { return Guard.Evaluate(Config, _ide.GetContext(), _ide.DatabaseIdentity); }
+            catch (Exception ex)
+            {
+                // fail closed: if the connection cannot be checked, it could be a protected one
+                Log.Warn("Production guard: the connection could not be checked (" + ex.Message + "); treated as read-only");
+                if (Config.ReadOnlyMode) return new GuardState { Mode = GuardMode.ReadOnlySetting };
+                if (string.IsNullOrWhiteSpace(Config.ProtectedConnections)) return new GuardState { Mode = GuardMode.Normal };
+                return new GuardState { Mode = GuardMode.Protected, Connection = "(unknown connection)", Pattern = "(the connection could not be checked)" };
+            }
         }
 
         /// <summary>Information for the model, sent with the next user message (e.g. "the user reverted your edit").</summary>
@@ -573,9 +580,10 @@ namespace PlsqlDevAgent.Agent
 
         private async Task<ApprovalResult> ApproveAsync(ApprovalRequest request, string callId)
         {
-            if (_alwaysAllow.Contains(request.Category)) return ApprovalResult.Yes();
+            bool alwaysAsk = request.AlwaysAsk || request.Category.EndsWith("-destructive");
+            if (!alwaysAsk && _alwaysAllow.Contains(request.Category)) return ApprovalResult.Yes();
             var result = await _ui.RequestApproval(callId, request, _ctx.Cancellation).ConfigureAwait(false);
-            if (result.Approved && result.AlwaysForSession && !request.Category.EndsWith("-destructive"))
+            if (result.Approved && result.AlwaysForSession && !alwaysAsk)
                 _alwaysAllow.Add(request.Category);
             return result;
         }

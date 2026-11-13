@@ -54,6 +54,16 @@ namespace PlsqlDevAgent.Ide
         /// commit or rollback there would also affect the user's own changes.
         /// </summary>
         bool UsesOwnSession { get; }
+
+        /// <summary>
+        /// Names of the database the session is really connected to (database, unique and service name, container,
+        /// server host, instance), separated by '|'; null while unknown. The production guard matches them as well,
+        /// so a protected database is recognized however it was reached (alias, EZConnect, IP address).
+        /// On the main thread it never waits (it loads in the background and raises <see cref="DatabaseIdentityChanged"/>).
+        /// </summary>
+        string DatabaseIdentity { get; }
+
+        event Action DatabaseIdentityChanged;
         void RefreshObject(string objectType, string owner, string name, int action);
 
         void ShowDifferences(string caption1, string text1, string caption2, string text2);

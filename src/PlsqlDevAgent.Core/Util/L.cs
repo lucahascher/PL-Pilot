@@ -37,6 +37,19 @@ namespace PlsqlDevAgent.Util
         {
             // agent run
             ["Stopped."] = "Gestoppt.",
+            // security / local data
+            ["This statement runs dynamic SQL whose effect cannot be checked beforehand."] = "Diese Anweisung führt dynamisches SQL aus, dessen Wirkung vorher nicht geprüft werden kann.",
+            ["This statement changes privileges, users, roles or system settings."] = "Diese Anweisung ändert Berechtigungen, Benutzer, Rollen oder Systemeinstellungen.",
+            ["This statement creates or changes jobs that run later."] = "Diese Anweisung legt Jobs an oder ändert Jobs, die später laufen.",
+            ["This query contains PL/SQL (WITH FUNCTION) that can change data."] = "Diese Abfrage enthält PL/SQL (WITH FUNCTION), das Daten ändern kann.",
+            ["This UPDATE has no WHERE clause and changes every row."] = "Dieses UPDATE hat keine WHERE-Bedingung und ändert jede Zeile.",
+            ["This trigger runs automatically on database or schema events (e.g. at every logon)."] = "Dieser Trigger läuft automatisch bei Datenbank- oder Schemaereignissen (z. B. bei jeder Anmeldung).",
+            ["This file belongs to the configuration of git, an IDE or the agent (e.g. git hooks run code on the next commit)."] = "Diese Datei gehört zur Konfiguration von Git, einer IDE oder des Agents (z. B. führen Git-Hooks beim nächsten Commit Code aus).",
+            ["This file contains instructions for the agent or for git."] = "Diese Datei enthält Anweisungen für den Agent oder für Git.",
+            ["This is a script or program file that can run code."] = "Dies ist eine Skript- oder Programmdatei, die Code ausführen kann.",
+            ["(not stored on this PC)"] = "(auf diesem PC nicht gespeichert)",
+            ["{0} saved chat(s) and the prompt history were deleted."] = "{0} gespeicherte(r) Chat(s) und der Eingabeverlauf wurden gelöscht.",
+            ["Chat history is off: saved chats and the prompt history are deleted and nothing is saved any more."] = "Der Chatverlauf ist ausgeschaltet: Gespeicherte Chats und der Eingabeverlauf werden gelöscht, es wird nichts mehr gespeichert.",
             // uncommitted changes of the agent's session
             ["Stop the agent before committing or rolling back."] = "Stoppen Sie den Agent vor Commit oder Rollback.",
             ["The agent uses the main session of PL/SQL Developer: commit or roll back there."] = "Der Agent nutzt die Hauptsitzung von PL/SQL Developer: Commit oder Rollback bitte dort.",

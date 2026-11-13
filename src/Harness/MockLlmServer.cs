@@ -120,6 +120,14 @@ namespace PlsqlDevAgent.Harness
                     : Final($"Findings{label}: table EMP is used in EMP_API.list_emps (line 4).");
             }
 
+            // "EXECSQL: <statement>": runs exactly that statement with execute_sql
+            var exec = System.Text.RegularExpressions.Regex.Match(request, @"EXECSQL: (.+?)\s*$", System.Text.RegularExpressions.RegexOptions.Multiline);
+            if (exec.Success)
+            {
+                bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);
+                return done ? Final("Done.") : ToolCall("es_" + messages.Count, "execute_sql", new JObject { ["sql"] = exec.Groups[1].Value });
+            }
+
             if (request.Contains("DMLTEST"))
             {
                 bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);

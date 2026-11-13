@@ -81,6 +81,34 @@ namespace PlsqlDevAgent.Agent
 
         public static BackupEntry Get(string id) => List(max: int.MaxValue).FirstOrDefault(e => e.Id == id);
 
+        /// <summary>Deletes backups made before <paramref name="cutoff"/> (retention setting); returns how many.</summary>
+        public static int DeleteOlderThan(DateTime cutoff)
+        {
+            lock (Sync)
+            {
+                if (!File.Exists(IndexFile)) return 0;
+                var keep = new List<string>();
+                int deleted = 0;
+                foreach (var line in File.ReadAllLines(IndexFile, Encoding.UTF8).Where(l => l.Trim().Length > 0))
+                {
+                    BackupEntry e = null;
+                    try { e = JsonConvert.DeserializeObject<BackupEntry>(line); } catch { }
+                    if (e != null && e.Time < cutoff)
+                    {
+                        try { if (File.Exists(e.File)) File.Delete(e.File); } catch { }
+                        deleted++;
+                    }
+                    else keep.Add(line);
+                }
+                if (deleted > 0)
+                {
+                    File.WriteAllText(IndexFile, string.Concat(keep.Select(l => l + "\n")), Encoding.UTF8);
+                    Util.Log.Info($"Deleted {deleted} source backup(s) older than {cutoff:yyyy-MM-dd}");
+                }
+                return deleted;
+            }
+        }
+
         public static string ReadSource(BackupEntry entry) => File.ReadAllText(entry.File, Encoding.UTF8);
 
         private static string Sanitize(string s) => Regex.Replace(s ?? "", @"[^\w@.\-$#]", "_");

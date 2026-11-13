@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">
+<!-- Only the page's own script (nonce set per load by ChatForm.LoadHtml) may run: injected HTML can never execute script. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-__CSP_NONCE__'; img-src data:; base-uri 'none'; form-action 'none'; frame-src 'none';">
 <title>PL/Pilot</title>
 <style>
 /* Colors follow VS Code's "Light Modern" and "Dark Modern" themes. */
@@ -398,6 +399,15 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Auto Approve SQL</div><label><input type="checkbox" id="AutoApproveSql"><span class="s-desc">Execute SQL and compile without asking. DROP, DELETE and TRUNCATE always ask.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Auto Approve File Writes</div><label><input type="checkbox" id="AutoApproveFileWrites"><span class="s-desc">Write files without asking.</span></label></div>
 
+    <h4>Local Data</h4>
+    <div class="setting check"><div class="s-title"><span class="s-cat">Local data: </span>Save Chat History</div><label><input type="checkbox" id="SaveChatHistory"><span class="s-desc">Chats and the prompt history (↑) are saved on this PC so you can reopen them. Off: nothing is saved; already saved chats and the prompt history are deleted when you save the settings.</span></label></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Local data: </span>Saved Content</div><div class="s-desc">What a saved chat contains. Without tool results: query results, file and object contents and attachments are left out (the agent's answers are kept as written and may quote data).</div>
+      <select id="ChatHistoryContent"><option value="noResults">Without tool results (recommended)</option><option value="full">Full conversation</option></select></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Local data: </span>Keep Chats (days)</div><div class="s-desc">Saved chats and prompt history entries older than this are deleted. 0 = keep until deleted manually.</div><input id="ChatRetentionDays" type="number" min="0" max="3650"></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Local data: </span>Keep Backups (days)</div><div class="s-desc">Source backups (Restore previous) older than this are deleted. 0 = keep.</div><input id="BackupRetentionDays" type="number" min="0" max="3650"></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Local data: </span>Keep Log (days)</div><div class="s-desc">Log entries older than this are deleted (the log contains SQL statements of the agent). 0 = keep; the log is limited to 2 × 2 MB.</div><input id="LogRetentionDays" type="number" min="0" max="3650"></div>
+    <div class="setting"><div class="row" style="align-items:center"><button id="btnDeleteHistory">Delete Saved Chats Now</button><span id="historyResult" class="small"></span></div></div>
+
     <h4>Appearance</h4>
     <div class="setting"><div class="s-title"><span class="s-cat">Appearance: </span>Theme</div>
       <select id="Theme"><option value="auto">Same as PL/SQL Developer</option><option value="light">Light</option><option value="dark">Dark</option></select></div>
@@ -442,7 +452,7 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
   </div>
 </div>
 
-<script>
+<script nonce="__CSP_NONCE__">
 'use strict';
 const $ = id => document.getElementById(id);
 const host = window.chrome && window.chrome.webview;
@@ -563,6 +573,23 @@ const DE = {
     'Nicht festgeschriebene Änderungen in der Hauptsitzung von PL/SQL Developer, die der Agent mitbenutzt: dort festschreiben oder verwerfen',
   'Commit these changes of the agent permanently?': 'Diese Änderungen des Agents dauerhaft festschreiben (Commit)?',
   'Roll back (discard) these changes of the agent?': 'Diese Änderungen des Agents verwerfen (Rollback)?',
+  'Local Data': 'Lokale Daten',
+  'Local data: ': 'Lokale Daten: ',
+  'Save Chat History': 'Chatverlauf speichern',
+  'Chats and the prompt history (↑) are saved on this PC so you can reopen them. Off: nothing is saved; already saved chats and the prompt history are deleted when you save the settings.': 'Chats und der Eingabeverlauf (↑) werden auf diesem PC gespeichert, damit Sie sie wieder öffnen können. Aus: Es wird nichts gespeichert; bereits gespeicherte Chats und der Eingabeverlauf werden beim Speichern der Einstellungen gelöscht.',
+  'Saved Content': 'Gespeicherter Inhalt',
+  'What a saved chat contains. Without tool results: query results, file and object contents and attachments are left out (the agent\'s answers are kept as written and may quote data).': 'Was ein gespeicherter Chat enthält. Ohne Werkzeugergebnisse: Abfrageergebnisse, Datei- und Objektinhalte sowie Anhänge werden weggelassen (die Antworten des Agents bleiben wie geschrieben und können Daten zitieren).',
+  'Without tool results (recommended)': 'Ohne Werkzeugergebnisse (empfohlen)',
+  'Full conversation': 'Vollständige Unterhaltung',
+  'Keep Chats (days)': 'Chats aufbewahren (Tage)',
+  'Saved chats and prompt history entries older than this are deleted. 0 = keep until deleted manually.': 'Gespeicherte Chats und Einträge des Eingabeverlaufs, die älter sind, werden gelöscht. 0 = bis zum manuellen Löschen aufbewahren.',
+  'Keep Backups (days)': 'Sicherungen aufbewahren (Tage)',
+  'Source backups (Restore previous) older than this are deleted. 0 = keep.': 'Quelltext-Sicherungen (Vorherige Version wiederherstellen), die älter sind, werden gelöscht. 0 = aufbewahren.',
+  'Keep Log (days)': 'Log aufbewahren (Tage)',
+  'Log entries older than this are deleted (the log contains SQL statements of the agent). 0 = keep; the log is limited to 2 × 2 MB.': 'Log-Einträge, die älter sind, werden gelöscht (das Log enthält SQL-Anweisungen des Agents). 0 = aufbewahren; das Log ist ohnehin auf 2 × 2 MB begrenzt.',
+  'Delete Saved Chats Now': 'Gespeicherte Chats jetzt löschen',
+  'Delete all saved chats and the prompt history now?': 'Alle gespeicherten Chats und den Eingabeverlauf jetzt löschen?',
+  'Chat history is turned off (Settings → Local data).': 'Der Chatverlauf ist ausgeschaltet (Einstellungen → Lokale Daten).',
   'Separate Session': 'Eigene Sitzung', 'Use a separate database session for the agent, so it does not touch your transaction.': 'Eine eigene Datenbanksitzung für den Agent verwenden, damit er Ihre Transaktion nicht berührt.',
   'Auto Approve Editor Edits': 'Editor-Änderungen automatisch zulassen', 'Apply editor edits without asking.': 'Editor-Änderungen ohne Rückfrage übernehmen.',
   'Auto Approve SQL': 'SQL automatisch zulassen', 'Execute SQL and compile without asking. DROP, DELETE and TRUNCATE always ask.': 'SQL ohne Rückfrage ausführen und kompilieren. Bei DROP, DELETE und TRUNCATE wird immer gefragt.',
@@ -1062,24 +1089,34 @@ function approval(m) {
   else if (m.detail) html += '<pre><code>' + highlight(m.detail, m.language || 'sql') + '</code></pre>';
   html += '<div class="aactions">' +
     '<button class="primary" data-a="yes">' + t('Allow') + '</button>' +
-    (m.category && !/-destructive$/.test(m.category) ? '<button data-a="always" title="' + t('Allow this and similar actions for the rest of this chat') + '">' + t('Always Allow') + '</button>' : '') +
+    (m.category && !m.alwaysAsk && !/-destructive$/.test(m.category) ? '<button data-a="always" title="' + t('Allow this and similar actions for the rest of this chat') + '">' + t('Always Allow') + '</button>' : '') +
     (m.canDiffInIde ? '<button data-a="diff" title="' + esc(t("Open in PL/SQL Developer's difference viewer")) + '">' + t('Open Diff') + '</button>' : '') +
     '<button data-a="no">' + t('Reject') + '</button>' +
     '<input placeholder="' + t('Feedback for the agent (optional)') + '"></div>';
   card.innerHTML = html;
   const fb = card.querySelector('input');
+  // the card can appear while the user is typing: a key press meant for the input box must not decide it
+  const armedAt = Date.now() + 700;
   card.querySelectorAll('button[data-a]').forEach(b => b.onclick = () => {
     const a = b.dataset.a;
     if (a === 'diff') { send({ type: 'open_diff', id: m.id }); return; }
+    if (Date.now() < armedAt) return;
     const approved = a !== 'no';
     send({ type: 'approval_reply', id: m.id, approved, always: a === 'always', feedback: fb.value });
     finishApproval(m.id, approved ? t(a === 'always' ? 'Allowed (always for this chat)' : 'Allowed') : t('Rejected') + (fb.value ? ': ' + fb.value : ''), approved);
   });
-  fb.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); card.querySelector('button[data-a="' + (fb.value ? 'no' : 'yes') + '"]').click(); } });
+  // Enter in the feedback field rejects with that feedback; it never approves
+  fb.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (fb.value.trim()) card.querySelector('button[data-a="no"]').click(); } });
   approvals[m.id] = card;
   const toolEl = tools[m.callId];
   if (toolEl) toolEl.after(card); else append(card);
-  if (!replaying) { stick = true; toBottom(); card.querySelector('button.primary').focus({ preventScroll: true }); }
+  if (!replaying) {
+    stick = true; toBottom();
+    // no focus change while the user types somewhere: the next Space/Enter would press "Allow"
+    const active = document.activeElement;
+    const typing = active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT');
+    if (!typing) card.querySelector('button.primary').focus({ preventScroll: true });
+  }
 }
 function finishApproval(id, text, ok) {
   const card = approvals[id]; if (!card || card.classList.contains('done')) return;
@@ -1312,6 +1349,7 @@ function submit() {
 $('btnSend').onclick = () => { if (busy) send({ type: 'stop' }); else submit(); };
 $('btnNew').onclick = () => { if (busy && !confirm(t('Stop the running request and start a new chat?'))) return; send({ type: 'new_chat' }); showEmpty(); };
 $('btnSettings').onclick = () => send({ type: 'get_settings' });
+$('btnDeleteHistory').onclick = () => { if (confirm(t('Delete all saved chats and the prompt history now?'))) { $('historyResult').textContent = ''; send({ type: 'delete_history' }); } };
 
 // ---------------------------------------------------------------- saved chats (quick pick)
 let chatItems = [], chatCurrent = null, chatActive = 0;
@@ -1322,7 +1360,7 @@ function renderChats() {
   const q = $('historyFilter').value.trim().toLowerCase();
   const items = chatItems.filter(c => !q || (c.title + ' ' + c.connection).toLowerCase().includes(q));
   const list = $('chatList');
-  list.innerHTML = items.length ? '' : '<div class="small" style="padding:4px 6px">' + t(chatItems.length ? 'No matching chats' : 'No saved chats yet. Chats are saved automatically after each answer.') + '</div>';
+  list.innerHTML = items.length ? '' : '<div class="small" style="padding:4px 6px">' + t(chatItems.length ? 'No matching chats' : historyDisabled ? 'Chat history is turned off (Settings → Local data).' : 'No saved chats yet. Chats are saved automatically after each answer.') + '</div>';
   chatActive = Math.min(chatActive, Math.max(0, items.length - 1));
   items.forEach((c, i) => {
     const d = el('div', 'chatitem' + (i === chatActive ? ' active' : ''),
@@ -1339,7 +1377,9 @@ function openChat(id) {
   closeHistory();
   send({ type: 'open_chat', id });
 }
+let historyDisabled = false;
 function showChats(m) {
+  historyDisabled = !!m.disabled;
   chatItems = m.items || []; chatCurrent = m.current;
   const wasOpen = $('history').classList.contains('open');
   if (!wasOpen) { $('historyFilter').value = ''; chatActive = 0; }
@@ -1371,6 +1411,7 @@ function replay(events) {
 const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'CompactAtPercent', 'RequestTimeoutSeconds', 'ExtraBodyJson',
   'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
   'MaxQueryRows', 'ProtectedConnections', 'BackupBeforeChanges',
+  'SaveChatHistory', 'ChatHistoryContent', 'ChatRetentionDays', 'BackupRetentionDays', 'LogRetentionDays',
   'ReadOnlyMode', 'SeparateSession', 'UseDbaViews', 'AutoApproveEditorEdits', 'AutoApproveSql', 'AutoApproveFileWrites', 'DevTools', 'Theme', 'Language'];
 let settingsBase = {};
 function openSettings(cfg) {
@@ -1556,6 +1597,7 @@ function onHost(m) {
     case 'folder': if (m.path) $('WorkspaceDir').value = m.path; break;
     case 'cleared': showEmpty(); break;
     case 'chats': showChats(m); break;
+    case 'history_deleted': prompts = []; promptIdx = 0; $('historyResult').textContent = m.text; break;
     case 'replay': replay(m.events || []); break;
     case 'mention_results':
       if (pop.pendingQ === m.q && document.activeElement === inputEl)

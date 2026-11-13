@@ -115,6 +115,10 @@ namespace PlsqlDevAgent.Harness
         }
 
         private ChatForm _chat;
+
+        /// <summary>Clicks "Allow" on every approval card (not on rewind cards).</summary>
+        private const string AutoApproveJs =
+            "window.__autoApprove = setInterval(() => { const b = document.querySelector('.approval:not(.done):not(.rewind-card) button.primary'); if (b) b.click(); }, 700);";
         private MockIde _ide;
         private StringWriter _log;
         private int _pass, _fail;
@@ -158,13 +162,13 @@ namespace PlsqlDevAgent.Harness
                 log.WriteLine("chat ready: " + chat.IsChatReady);
 
                 // auto approve every approval card
-                await chat.ExecuteScriptAsync("setInterval(() => { const b = document.querySelector('.approval:not(.done):not(.rewind-card) button.primary'); if (b) b.click(); }, 700);");
+                await chat.ExecuteScriptAsync(AutoApproveJs);
                 await SendAndWait(_prompt);
                 log.WriteLine("busy now: " + chat.IsBusy);
                 if (_prompt.StartsWith("Please improve"))
                 {
                     if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await PromptChecks(); }
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SecurityUiChecks(); await PromptChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -520,6 +524,145 @@ namespace PlsqlDevAgent.Harness
             await Task.Delay(300);
             d = await Js(DistanceJs);
             Check($"a small scroll up is respected, the next output does not pull the view down ({d} px)", int.Parse(d) >= 30);
+        }
+
+        private async Task<bool> WaitForCard(int ms = 8000)
+        {
+            for (int i = 0; i < ms / 50; i++)
+            {
+                if (await Js("document.querySelector('.approval:not(.done):not(.rewind-card)') ? 'y' : 'n'") == "y") return true;
+                await Task.Delay(50);
+            }
+            return false;
+        }
+
+        private async Task WaitIdle()
+        {
+            for (int i = 0; i < 200 && (_chat.IsBusy || i < 3); i++) await Task.Delay(100);
+            await Task.Delay(800);
+        }
+
+        private async Task Submit(string text) =>
+            await Js("(() => { const i = document.getElementById('input'); i.value = " + JsonConvert.SerializeObject(text) + "; submit(); })()");
+
+        /// <summary>Security fixes: CSP, approval focus/arming, statements that always ask, local data settings.</summary>
+        private async Task SecurityUiChecks()
+        {
+            // 1. Content-Security-Policy: injected HTML or script elements cannot run script
+            await Js("document.getElementById('messages').insertAdjacentHTML('beforeend', '<img src=x onerror=\"window.__xss1 = 1\">'); " +
+                     "const s = document.createElement('script'); s.textContent = 'window.__xss2 = 1'; document.body.appendChild(s);");
+            await Task.Delay(600);
+            Check("CSP: injected HTML and script elements cannot run script",
+                await Js("window.__xss1 === undefined && window.__xss2 === undefined ? 'blocked' : 'executed'") == "blocked");
+
+            // 2. approval cards: no focus change while typing, no decision in the first moment, Enter in empty feedback never approves
+            await Js("clearInterval(window.__autoApprove)");
+            await Js("document.getElementById('btnNew').click()");
+            await Task.Delay(600);
+            await Js("(() => { const i = document.getElementById('input'); i.value = 'EXECSQL: update emp set sal = sal where deptno = 10'; i.focus(); submit(); i.value = 'I am typing'; i.focus(); })()");
+            Check("approval card shown", await WaitForCard());
+            Check("the approval card does not take the focus from the input box", await Js("document.activeElement.id") == "input");
+            await Js("document.querySelector('.approval:not(.done) button[data-a=\"yes\"]').click()");
+            Check("a click in the first moment does not decide the card", await Js("document.querySelectorAll('.approval:not(.done)').length") == "1");
+            await Task.Delay(900);
+            await Js("document.querySelector('.approval:not(.done) input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))");
+            await Task.Delay(300);
+            Check("Enter in the empty feedback field does not approve", await Js("document.querySelectorAll('.approval:not(.done)').length") == "1");
+            await Js("document.querySelector('.approval:not(.done) button[data-a=\"yes\"]').click()");
+            await WaitIdle();
+            Check("after the short delay Allow works", _ide.ExecutedSql.Any(s => s.StartsWith("update emp set sal = sal where deptno = 10")));
+            await Js("document.getElementById('input').value = ''");
+
+            // 3. with "Auto approve SQL": sensitive statements still ask (without "Always Allow"), normal ones run
+            _chat.ApplyConfigForTest(c => c.AutoApproveSql = true);
+            foreach (var (sql, expect) in new[]
+            {
+                ("grant dba to scott", "privileges"),
+                ("begin execute immediate 'truncate table emp'; end;", "dynamic SQL"),
+                ("with function f return number is pragma autonomous_transaction; begin delete from emp; commit; return 1; end; select f from dual", "WITH FUNCTION"),
+            })
+            {
+                await Submit("EXECSQL: " + sql);
+                bool asked = await WaitForCard();
+                var card = asked ? await Js("document.querySelector('.approval:not(.done)').innerText") : "";
+                Check($"always asks despite auto-approve ({expect}): {(card.Length > 0 ? card.Split('\n')[1] : "no card")}", asked && card.Contains(expect) && !card.Contains("Always Allow"));
+                await Task.Delay(800);
+                if (asked) await Js("document.querySelector('.approval:not(.done) button[data-a=\"no\"]').click()");
+                await WaitIdle();
+                Check("rejected, so not executed: " + sql.Substring(0, Math.Min(20, sql.Length)), !_ide.ExecutedSql.Any(s => s.StartsWith(sql.Substring(0, Math.Min(20, sql.Length)))));
+            }
+            int cards = int.Parse(await Js("document.querySelectorAll('.approval').length"));
+            await Submit("EXECSQL: insert into dept values (40, 'OPERATIONS', 'BOSTON')");
+            await WaitIdle();
+            Check("a normal statement runs without a card when auto-approve is on",
+                _ide.ExecutedSql.Any(s => s.StartsWith("insert into dept values (40")) && int.Parse(await Js("document.querySelectorAll('.approval').length")) == cards);
+            _chat.ApplyConfigForTest(c => c.AutoApproveSql = false);
+            await Js(AutoApproveJs);
+
+            // 4. local data: saved chats without tool results, full content, retention, history off
+            // These checks delete chats, prompts, backups and log lines: only ever in the harness's own temp data folder.
+            var harnessData = Path.Combine(Path.GetTempPath(), "plsqldevagent-harness-data");
+            if (!string.Equals(Path.GetFullPath(PlsqlDevAgent.Util.Log.Directory).TrimEnd('\\'), Path.GetFullPath(harnessData).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            {
+                Check("local data checks skipped: the data folder is not the harness temp folder (" + PlsqlDevAgent.Util.Log.Directory + ")", false);
+                return;
+            }
+            string ChatJson(string id) => File.ReadAllText(Path.Combine(ChatStore.Directory, id + ".json"));
+            _chat.ApplyConfigForTest(c => { c.SaveChatHistory = true; c.ChatHistoryContent = "noResults"; });
+            await Js("document.getElementById('btnNew').click()");
+            await Task.Delay(600);
+            await SendAndWait("EXECSQL: select ename from emp");
+            var saved = ChatStore.List().First();
+            Check("saved chat without tool results: the query result is not on disk",
+                saved.Title.Contains("EXECSQL") && !ChatJson(saved.Id).Contains("ALLEN") && ChatJson(saved.Id).Contains("not stored on this PC"));
+            _chat.ApplyConfigForTest(c => c.ChatHistoryContent = "full");
+            await Js("document.getElementById('btnNew').click()");
+            await Task.Delay(600);
+            await SendAndWait("EXECSQL: select ename from emp where 1 = 1");
+            Check("saved chat with full content contains the query result", ChatJson(ChatStore.List().First().Id).Contains("ALLEN"));
+
+            // retention: an old chat, prompt, backup and log line are removed, recent ones stay
+            var old = DateTime.Now.AddDays(-40);
+            ChatStore.Save(new ChatRecord { Id = "20000101-000000-old001", Title = "old chat", Created = old, Updated = old });
+            PromptHistory.Delete();
+            File.WriteAllText(Path.Combine(PlsqlDevAgent.Util.Log.Directory, "prompts.json"),
+                JsonConvert.SerializeObject(new[] { new { Text = "old prompt", Time = old }, new { Text = "new prompt", Time = DateTime.Now } }));
+            var backup = BackupStore.Save("TEST@DB", "PROCEDURE", "TEST", "OLD_PROC", "create or replace procedure old_proc is begin null; end;", "test");
+            var index = Path.Combine(BackupStore.Directory, "index.jsonl");
+            File.WriteAllText(index, File.ReadAllText(index).Replace(JsonConvert.SerializeObject(backup.Time).Trim('"'), JsonConvert.SerializeObject(DateTime.Now.AddDays(-100)).Trim('"')));
+            var log = PlsqlDevAgent.Util.Log.FilePath;
+            File.WriteAllText(log, $"{DateTime.Now.AddDays(-40):yyyy-MM-dd HH:mm:ss.fff} INFO  very old log line\r\n" + File.ReadAllText(log));
+            var retention = new AgentConfig { SaveChatHistory = true, ChatRetentionDays = 30, BackupRetentionDays = 90, LogRetentionDays = 30 };
+            LocalData.Cleanup(retention);
+            Check("retention: the 40 days old chat is deleted, recent chats stay", ChatStore.Load("20000101-000000-old001") == null && ChatStore.List().Count >= 2);
+            var prompts = PromptHistory.Texts(retention);
+            Check("retention: the old prompt is deleted, the new one stays", !prompts.Contains("old prompt") && prompts.Contains("new prompt"));
+            Check("retention: the 100 days old backup is deleted", BackupStore.Get(backup.Id) == null && !File.Exists(backup.File));
+            Check("retention: the old log line is deleted", !File.ReadAllText(log).Contains("very old log line") && File.ReadAllText(log).Length > 0);
+
+            // history off (settings dialog): saved chats and prompts are deleted, nothing is saved any more
+            Plugin.Instance.OnMenuClick(Bootstrap.MiSettings);
+            await Task.Delay(800);
+            await Js("document.getElementById('SaveChatHistory').checked = false; document.getElementById('btnSaveSettings').click();");
+            await Task.Delay(1500);
+            Check("switching chat history off deletes the saved chats and the prompt history",
+                ChatStore.List().Count == 0 && !File.Exists(Path.Combine(PlsqlDevAgent.Util.Log.Directory, "prompts.json")));
+            await Js("document.getElementById('btnCloseSettings') && document.getElementById('btnCloseSettings').click()");
+            await Js("document.getElementById('btnNew').click()");
+            await Task.Delay(600);
+            await SendAndWait("Answer briefly: is anything saved?");
+            Check("with chat history off nothing is saved", ChatStore.List().Count == 0 &&
+                !File.Exists(Path.Combine(PlsqlDevAgent.Util.Log.Directory, "prompts.json")));
+            await Js("document.getElementById('btnHistory').click()");
+            await Task.Delay(600);
+            Check("the history list says that it is turned off", (await Js("document.getElementById('chatList').innerText")).Contains("turned off"));
+            await Js("closeHistory()");
+            // back on for the following tests
+            Plugin.Instance.OnMenuClick(Bootstrap.MiSettings);
+            await Task.Delay(800);
+            await Js("document.getElementById('SaveChatHistory').checked = true; document.getElementById('btnSaveSettings').click();");
+            await Task.Delay(1000);
+            await Js("document.getElementById('btnCloseSettings') && document.getElementById('btnCloseSettings').click()");
         }
 
         /// <summary>Uncommitted changes of the agent session: notice above the input, Rollback and Commit buttons, note to the model.</summary>

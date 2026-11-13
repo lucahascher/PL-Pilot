@@ -79,6 +79,36 @@ namespace PlsqlDevAgent.Agent
             }
         }
 
+        /// <summary>Deletes every saved chat; returns how many there were.</summary>
+        public static int DeleteAll()
+        {
+            lock (Sync)
+            {
+                if (!System.IO.Directory.Exists(Directory)) return 0;
+                int count = ReadIndex().Count;
+                foreach (var f in System.IO.Directory.GetFiles(Directory, "*.json")) TryDelete(f);
+                return count;
+            }
+        }
+
+        /// <summary>Deletes chats last updated before <paramref name="cutoff"/> (also files missing from the index).</summary>
+        public static int DeleteOlderThan(DateTime cutoff)
+        {
+            lock (Sync)
+            {
+                if (!System.IO.Directory.Exists(Directory)) return 0;
+                var index = ReadIndex();
+                var old = index.Where(h => h.Updated < cutoff).ToList();
+                foreach (var h in old) TryDelete(PathOf(h.Id));
+                if (old.Count > 0) WriteIndex(index.Except(old).ToList());
+                var known = new HashSet<string>(index.Except(old).Select(h => PathOf(h.Id)), StringComparer.OrdinalIgnoreCase) { IndexFile };
+                foreach (var f in System.IO.Directory.GetFiles(Directory, "*.json"))
+                    if (!known.Contains(f) && File.GetLastWriteTime(f) < cutoff) TryDelete(f);
+                if (old.Count > 0) Util.Log.Info($"Deleted {old.Count} saved chat(s) older than {cutoff:yyyy-MM-dd}");
+                return old.Count;
+            }
+        }
+
         private static string PathOf(string id) => Path.Combine(Directory, new string((id ?? "").Where(c => char.IsLetterOrDigit(c) || c == '-').ToArray()) + ".json");
 
         private static List<ChatHeader> ReadIndex()

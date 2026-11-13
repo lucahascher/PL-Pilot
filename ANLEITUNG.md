@@ -92,6 +92,25 @@ Unter **Einstellungen → Anweisungen & Regeln**:
 - `AGENTS.md` im Projektordner: Regeln für ein bestimmtes Projekt.
 - **Vollständigen System-Prompt anzeigen** zeigt, was das Modell tatsächlich erhält.
 
+## Was immer nachgefragt wird
+
+Auch mit *Automatisch zulassen* oder *Immer zulassen* fragt PL/Pilot immer nach bei: DROP/TRUNCATE/DELETE (auch in
+PL/SQL-Blöcken), dynamischem SQL, GRANT/REVOKE und Benutzer-/Systemänderungen, Jobs, UPDATE ohne WHERE, Abfragen mit
+PL/SQL in der WITH-Klausel, Triggern auf Datenbank-/Schemaereignisse (z. B. Anmeldung) und beim Schreiben von Git-,
+IDE- oder Agent-Konfiguration bzw. Skripten. Eine Zustimmungskarte nimmt dem Eingabefeld nie den Fokus und reagiert in
+den ersten Sekundenbruchteilen nicht – Tippen kann also nichts versehentlich zulassen.
+
+## Lokale Daten (Datenschutz)
+
+Unter **Einstellungen → Lokale Daten**:
+
+- **Chatverlauf speichern** an/aus. Aus: Es wird nichts gespeichert; bereits gespeicherte Chats und der Eingabeverlauf
+  werden beim Speichern der Einstellung gelöscht.
+- **Gespeicherter Inhalt**: *Ohne Werkzeugergebnisse* (Standard – keine Abfrageergebnisse, Datei- oder Objektinhalte)
+  oder vollständig. Die Antworten des Agents bleiben wie geschrieben und können Daten zitieren.
+- **Aufbewahrung** in Tagen für Chats (Standard 30), Quelltext-Sicherungen (90) und das Log (30).
+- **Gespeicherte Chats jetzt löschen**.
+
 ## HTTPS
 
 Die Basis-URL darf mit `https://` beginnen. In der URL den Servernamen verwenden, für den das Zertifikat ausgestellt

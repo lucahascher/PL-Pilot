@@ -34,7 +34,9 @@ namespace PlsqlDevAgent
                 try { Application.EnableVisualStyles(); } catch { }
             }
             MainThread.Initialize();
-            ApplyLanguage(ide, AgentConfig.Load());
+            var cfg = AgentConfig.Load();
+            ApplyLanguage(ide, cfg);
+            System.Threading.Tasks.Task.Run(() => LocalData.Cleanup(cfg)); // retention periods (Settings → Local data)
             Instance = new Plugin(ide);
             return Instance;
         }

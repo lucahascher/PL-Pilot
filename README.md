@@ -29,9 +29,26 @@ every change is shown to you (with a diff) and needs your approval.
 
 - Safety
   - approval cards for every change ("Approve", "Always" for this chat, "Reject" with feedback,
-    "IDE diff" opens PL/SQL Developer's difference viewer); DROP/DELETE/TRUNCATE always ask
+    "IDE diff" opens PL/SQL Developer's difference viewer). A card never takes the focus from the input box
+    and ignores clicks/keys in its first 0.7 s, so typing cannot approve it by accident; Enter in its
+    feedback field only rejects.
+  - **always asked**, also with *Auto approve* and *Always allow*: DROP/TRUNCATE/DELETE (also inside PL/SQL
+    blocks and MERGE), dynamic SQL (EXECUTE IMMEDIATE, DBMS_SQL), GRANT/REVOKE, user/role/system changes,
+    jobs (DBMS_SCHEDULER/DBMS_JOB), UPDATE without WHERE, queries with PL/SQL in the WITH clause (they can
+    change and commit data, so `run_query` refuses them), triggers on database/schema events (e.g. logon), and
+    file writes to git/IDE/agent configuration (`.git`, `.vscode`, `.plsqlagent`, `AGENTS.md`) or scripts
   - **production guard**: connections matching patterns (default `*PROD*;*PRD*`) are read-only for the
-    agent; badge in the chat header to unlock a protected connection or lock any other one for the session
+    agent; the patterns are matched against the logon text *and* the database's own names (DB_NAME,
+    DB_UNIQUE_NAME, SERVICE_NAME, CON_NAME, SERVER_HOST, INSTANCE_NAME), so an alias or IP address does not
+    bypass it; badge in the chat header to unlock a protected connection or lock any other one for the session.
+    Note: "read-only" means the agent issues no changing statements; functions called in a query can still have
+    side effects. For a hard guarantee on production use a database account with read-only privileges.
+  - the chat page only runs its own script (Content-Security-Policy with a per-load nonce); the Windows login is
+    sent to the proxy only, never to the LLM server
+  - **local data** (Settings → Local data): chat history on/off (off: nothing is saved, saved chats and the
+    prompt history are deleted), saved content *without tool results* (default: no query results, file or
+    object contents) or full, retention periods for chats (30 days), source backups (90) and the log (30),
+    "Delete saved chats now". Undo information lives in memory only.
   - **backups**: before the agent replaces or drops a PL/SQL unit or view, the database version is saved
     (`%LOCALAPPDATA%\PlsqlDevAgent\backups`); "Restore previous" button in the chat, `restore_backup` tool
   - **undo**: "Revert" button for every editor/file edit the agent (or an Insert button) applied
@@ -144,11 +161,15 @@ the "Desktop development with C++" workload.
 - **Harness** (`src\Harness`): runs the chat window outside PL/SQL Developer with a simulated IDE.
   `--mock-llm` uses a scripted fake OpenAI server; `--llm <baseUrl> <model>` a real one;
   `--autotest <dir> [--prompt "..."] [--offscreen]` drives one conversation and writes transcript/screenshots.
-- **In-IDE self test**: set `PLSQLDEVAGENT_AUTOTEST=<output dir>` (and optionally
+- **In-IDE self test**: set `PLSQLDEVAGENT_AUTOTEST=<output dir>`,
+  `PLSQLDEVAGENT_AUTOTEST_CONNECTION=<USER@DATABASE exactly as in the chat header>` (and optionally
   `PLSQLDEVAGENT_AUTOTEST_PROMPT=<task for the LLM>`) and start PL/SQL Developer logged on, e.g.
   `plsqldev.exe userid=scott/tiger@localhost:1521/FREEPDB1`. After start-up the plug-in runs every
-  database/editor tool against the real IDE callbacks (creates EMP/DEPT/EMP_API in that schema – use a
-  test database), optionally one LLM task in the chat window, writes `report.md` and closes the IDE.
+  database/editor tool against the real IDE callbacks (creates and drops EMP/DEPT/EMP_API and more in that
+  schema – use a test database), optionally one LLM task in the chat window, writes `report.md` and closes the IDE.
+  It refuses to run (and changes nothing) unless the connection matches `PLSQLDEVAGENT_AUTOTEST_CONNECTION` and is
+  not protected. Quick modes via `PLSQLDEVAGENT_AUTOTEST_PROMPT`: `SQL-ONLY`, `REWIND-ONLY`, `TXN-ONLY`,
+  `TXN-CLOSE`, `SEC-ONLY`, `ENC-ONLY`, `HTTPS-ONLY` (no database).
   A local test database: `docker run -d -p 1521:1521 -e ORACLE_PASSWORD=... -e APP_USER=scott -e APP_USER_PASSWORD=tiger gvenzl/oracle-free:23-slim-faststart`.
   PL/SQL Developer needs an Oracle client; the Instant Client (Basic Lite zip) on the `PATH` is enough.
 

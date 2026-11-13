@@ -223,6 +223,8 @@ namespace PlsqlDevAgent.Agent.Tools
         public string DiffLeftCaption, DiffLeftText, DiffRightCaption, DiffRightText;
         /// <summary>Extra warning (e.g. destructive statement).</summary>
         public string Warning;
+        /// <summary>Never approved automatically: not by "Always allow" for the chat and not by the auto-approve settings.</summary>
+        public bool AlwaysAsk;
     }
 
     public sealed class ApprovalResult

@@ -135,6 +135,8 @@ namespace PlsqlDevAgent.Harness
         public string PendingTransaction => _transaction;
         public event Action TransactionChanged;
         public bool UsesOwnSession => true;
+        public string DatabaseIdentity => "XE|XE|XEPDB1|XEPDB1|mockhost|XE";
+        public event Action DatabaseIdentityChanged { add { } remove { } }
 
         public void RefreshObject(string objectType, string owner, string name, int action) { }
 
