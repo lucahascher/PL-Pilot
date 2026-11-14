@@ -92,7 +92,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 : await ctx.ApproveAsync(new ApprovalRequest
                 {
                     Category = "editor",
-                    Title = $"{L.T(title)} — {c.WindowLabelUi}",
+                    Title = $"{L.T(title)} — {c.WindowNameUi}",
                     Diff = LineDiff.Unified(before, after),
                     DiffLeftCaption = L.T("Current editor text"),
                     DiffLeftText = before,

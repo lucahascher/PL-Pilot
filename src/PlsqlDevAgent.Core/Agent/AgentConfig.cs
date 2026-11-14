@@ -17,7 +17,7 @@ namespace PlsqlDevAgent.Agent
         /// <summary>OpenAI compatible base URL, e.g. http://llm-server:8000/v1 (".../chat/completions" is accepted too).</summary>
         public string BaseUrl { get; set; } = "http://localhost:8000/v1";
         [JsonIgnore] public string ApiKey { get; set; } = "";
-        public string Model { get; set; } = "deepseek-v4.1";
+        public string Model { get; set; } = ""; // chosen after "Test" in the settings
         public double Temperature { get; set; } = 0.2;
         public int MaxTokens { get; set; } = 8192;
         public int RequestTimeoutSeconds { get; set; } = 600;

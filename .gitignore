@@ -3,3 +3,7 @@ obj/
 dist/
 .vs/
 *.user
+*.log
+TestResults/
+.idea/
+*.DotSettings.user

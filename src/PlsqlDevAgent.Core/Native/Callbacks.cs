@@ -95,11 +95,9 @@ namespace PlsqlDevAgent.Native
         public static StrFnStr1 IDE_GetGeneralPref;             // 218
         public static StrFnStr1 IDE_GetUserPref;                // 266
         public static IntFn IDE_GetWindowConnection;            // 245
-        public static IntFnOut5 IDE_GetConnectionInfoEx;        // 240
         public static VoidFnIntStr4 IDE_ShowDifferences;        // 260
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        public delegate int IntFnOut5(int ix, out IntPtr user, out IntPtr pwd, out IntPtr db, out IntPtr connectAs);
+        // IDE_GetConnectionInfoEx (240) is deliberately not bound: it returns the password. IDE_GetConnectionInfo is
+        // only called with the password parameter discarded.
 
         public static void Initialize(IntPtr table)
         {
@@ -156,7 +154,6 @@ namespace PlsqlDevAgent.Native
             IDE_GetCurrentStyle = Get<VoidFnOutIntOutStr>(185);
             IDE_GetGeneralPref = Get<StrFnStr1>(218);
             IDE_GetUserPref = Get<StrFnStr1>(266);
-            IDE_GetConnectionInfoEx = Get<IntFnOut5>(240);
             IDE_GetWindowConnection = Get<IntFn>(245);
             IDE_ShowDifferences = Get<VoidFnIntStr4>(260);
         }

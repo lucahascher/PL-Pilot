@@ -128,6 +128,49 @@ namespace PlsqlDevAgent.Harness
                 return done ? Final("Done.") : ToolCall("es_" + messages.Count, "execute_sql", new JObject { ["sql"] = exec.Groups[1].Value });
             }
 
+            // README demo: a realistic task from reading the editor to compiling
+            if (request.Contains("list_emps is slow"))
+            {
+                var lastCallId = role == "tool" ? (string)last["tool_call_id"] : null;
+                var lastName = messages.OfType<JObject>().Where(m => m["tool_calls"] != null).SelectMany(m => m["tool_calls"])
+                    .Where(c => (string)c["id"] == lastCallId).Select(c => (string)c["function"]["name"]).FirstOrDefault();
+                switch (lastName)
+                {
+                    case null:
+                        return Text("The user wants list_emps to be faster. I will read the package body in the editor first.", "reasoning_content")
+                            .Concat(ToolCall("demo_1", "get_editor_text", new JObject { ["with_line_numbers"] = true }));
+                    case "get_editor_text":
+                        return Text("list_emps selects every column of EMP but only prints ENAME. Let me check the table.", "reasoning_content")
+                            .Concat(ToolCall("demo_2", "describe_object", new JObject { ["name"] = "EMP" }));
+                    case "describe_object":
+                        return Text("`list_emps` fetches all columns of `EMP` but only uses `ENAME`. I'll read just that column and sort the result.")
+                            .Concat(ToolCall("demo_3", "edit_editor", new JObject
+                            {
+                                ["old_string"] = "    for r in (select * from emp e where e.deptno = p_deptno) loop",
+                                ["new_string"] = "    for r in (select e.ename\n                from emp e\n               where e.deptno = p_deptno\n               order by e.ename) loop",
+                            }));
+                    case "edit_editor":
+                        return ToolCall("demo_4", "compile_plsql", new JObject
+                        {
+                            ["source"] = "create or replace package body emp_api is\n  procedure list_emps(p_deptno in number) is\n  begin\n" +
+                                         "    for r in (select e.ename\n                from emp e\n               where e.deptno = p_deptno\n               order by e.ename) loop\n" +
+                                         "      dbms_output.put_line(r.ename);\n    end loop;\n  end list_emps;\nend emp_api;",
+                        });
+                    default:
+                        return Final("**Done.** `list_emps` now reads only the column it prints, in a stable order:\n\n" +
+                                     "```sql\nfor r in (select e.ename\n            from emp e\n           where e.deptno = p_deptno\n           order by e.ename) loop\n```\n\n" +
+                                     "The package body **compiled without errors**. An index on `EMP(DEPTNO)` would help as well once the table grows. Shall I create it?");
+                }
+            }
+
+            if (request.Contains("Raise the salaries"))
+            {
+                bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);
+                return done ? Final("Raised the salaries of department 10 by 10 %. The change is not committed yet.")
+                    : Text("I'll update the salaries of department 10 in a single statement.")
+                        .Concat(ToolCall("raise_1", "execute_sql", new JObject { ["sql"] = "update emp\n   set sal = round(sal * 1.1, 2)\n where deptno = 10", ["purpose"] = "Raise the salaries of department 10 by 10 %" }));
+            }
+
             if (request.Contains("DMLTEST"))
             {
                 bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);

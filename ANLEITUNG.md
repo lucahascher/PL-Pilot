@@ -4,11 +4,13 @@ PL/Pilot ist der KI-Copilot direkt in PL/SQL Developer. Er liest und bearbeitet 
 Editorfenster, untersucht die Datenbank (Tabellen, Packages, Quelltexte), führt Abfragen aus, kompiliert
 PL/SQL und behebt Kompilierfehler. **Jede Änderung braucht Ihre Zustimmung.**
 
-Er arbeitet mit unserem eigenen, intern betriebenen Sprachmodell – es verlassen keine Daten das Firmennetz.
+Er arbeitet mit dem Sprachmodell, das in den Einstellungen eingetragen ist (z. B. ein intern betriebener Server) –
+Daten gehen nur an diesen Server. Diese Kurzanleitung richtet sich an Anwender; Details stehen in der
+[README](README.md) (englisch).
 
 ## Installation (ohne Administratorrechte)
 
-1. `PLPilot.zip` entpacken.
+1. `PLPilot.zip` aus dem [neuesten Release](https://github.com/xZeenos/PL-Agent/releases/latest) herunterladen und entpacken.
 2. Rechtsklick auf `install.ps1` → *Mit PowerShell ausführen*
    (oder: `powershell -ExecutionPolicy Bypass -File .\install.ps1`).
    Das Plug-in wird nach `%LOCALAPPDATA%\PlsqlDevAgent\PlugIns` kopiert.
@@ -21,7 +23,7 @@ Er arbeitet mit unserem eigenen, intern betriebenen Sprachmodell – es verlasse
 
 **Plug-Ins → PL-Pilot → Einstellungen**:
 
-- **Basis-URL** und **Modell** unseres LLM-Servers eintragen, **Testen** klicken, **Speichern**.
+- **Basis-URL** und **Modell** Ihres LLM-Servers eintragen (ggf. von der IT), **Testen** klicken, **Speichern**.
 - **Sprache**: *Automatisch* übernimmt die Sprache von PL/SQL Developer bzw. Windows; *Deutsch* erzwingt Deutsch.
   Die Menüs von PL/SQL Developer wechseln nach einem Neustart.
 
@@ -84,7 +86,7 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
 
 Unter **Einstellungen → Anweisungen & Regeln**:
 
-- **Firmenregeln:** Markdown-Datei oder -Ordner mit unseren Namens- und Programmierkonventionen (z. B. auf
+- **Firmenregeln:** Markdown-Datei oder -Ordner mit den Namens- und Programmierkonventionen Ihres Teams (z. B. auf
   dem Netzlaufwerk). **Bearbeiten…** legt eine Datei aus einer Vorlage an. Zusätzlich werden alle `*.md`-Dateien
   im Ordner `PlugIns\PlsqlDevAgent\rules` geladen.
 - **System-Prompt:** die Grundanweisungen des Agents; anpassbar, **Auf Standard zurücksetzen** stellt sie wieder her.

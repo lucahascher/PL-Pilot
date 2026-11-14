@@ -28,6 +28,10 @@ namespace PlsqlDevAgent.Harness
             int promptIdx = Array.IndexOf(args, "--prompt");
             string prompt = promptIdx >= 0 && promptIdx + 1 < args.Length ? args[promptIdx + 1] : "Please improve the query in the editor";
             bool offscreen = args.Contains("--offscreen");
+            // --screenshots <dir>: the scripted demo conversation, captured for the README (mock LLM, off-screen)
+            int shotIdx = Array.IndexOf(args, "--screenshots");
+            HarnessForm.ScreenshotDir = shotIdx >= 0 && shotIdx + 1 < args.Length ? args[shotIdx + 1] : null;
+            if (HarnessForm.ScreenshotDir != null) { mock = true; offscreen = true; }
 
             if (mock || llmIdx >= 0)
             {
@@ -46,7 +50,8 @@ namespace PlsqlDevAgent.Harness
                     var server = new MockLlmServer(18765);
                     server.Start();
                     cfg.BaseUrl = $"http://127.0.0.1:{server.Port}/v1";
-                    cfg.Model = "mock-deepseek";
+                    cfg.Model = HarnessForm.ScreenshotDir != null ? "deepseek-chat" : "mock-deepseek";
+                    if (HarnessForm.ScreenshotDir != null) { cfg.WindowWidth = 520; cfg.WindowHeight = 980; }
                 }
                 else
                 {
@@ -103,7 +108,8 @@ namespace PlsqlDevAgent.Harness
             Shown += async (s, e) =>
             {
                 Plugin.Create(_ide = new MockIde(this));
-                if (_autoTestDir != null) await AutoTest();
+                if (ScreenshotDir != null) await Screenshots();
+                else if (_autoTestDir != null) await AutoTest();
             };
         }
 
@@ -524,6 +530,47 @@ namespace PlsqlDevAgent.Harness
             await Task.Delay(300);
             d = await Js(DistanceJs);
             Check($"a small scroll up is respected, the next output does not pull the view down ({d} px)", int.Parse(d) >= 30);
+        }
+
+        /// <summary>Set by --screenshots: folder for the README images.</summary>
+        public static string ScreenshotDir;
+
+        /// <summary>Captures the README images: a whole conversation (light and dark) and a pending approval card.</summary>
+        private async Task Screenshots()
+        {
+            try
+            {
+                Directory.CreateDirectory(ScreenshotDir);
+                Plugin.Instance.OnMenuClick(Bootstrap.MiChat);
+                _chat = Plugin.Instance.ChatWindow;
+                for (int i = 0; i < 150 && !_chat.IsChatReady; i++) await Task.Delay(200);
+                await Js(AutoApproveJs);
+                await SendAndWait("list_emps is slow, please fix it and compile the package.");
+                await Js("document.getElementById('messages').scrollTop = 0");
+                await Task.Delay(400);
+                await _chat.CapturePageAsync(Path.Combine(ScreenshotDir, "chat.png"));
+                await Js("onHost({ type: 'theme', dark: true }); const m = document.getElementById('messages'); m.scrollTop = m.scrollHeight;");
+                await Task.Delay(600);
+                await _chat.CapturePageAsync(Path.Combine(ScreenshotDir, "chat-dark.png"));
+                await Js("onHost({ type: 'theme', dark: false })");
+
+                // a shorter window for the approval: the card, then the result with the uncommitted-changes notice
+                _chat.Height = _chat.Height * 560 / 980;
+                await Js("clearInterval(window.__autoApprove); document.getElementById('btnNew').click()");
+                await Task.Delay(600);
+                await Submit("Raise the salaries of department 10 by 10 percent.");
+                await WaitForCard();
+                await Task.Delay(900);
+                await _chat.CapturePageAsync(Path.Combine(ScreenshotDir, "approval.png"));
+                await Js("document.querySelector('.approval:not(.done) button[data-a=\"yes\"]').click()");
+                await WaitIdle();
+                await _chat.CapturePageAsync(Path.Combine(ScreenshotDir, "uncommitted.png"));
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(Path.Combine(ScreenshotDir, "error.txt"), ex.ToString());
+            }
+            Application.Exit();
         }
 
         private async Task<bool> WaitForCard(int ms = 8000)

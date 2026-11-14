@@ -94,9 +94,9 @@ Remove-Item (Join-Path $pluginDir "PlsqlDevAgent.exp"), (Join-Path $pluginDir "P
 # install.ps1 contains German text: Windows PowerShell 5.1 needs a UTF-8 BOM to read it correctly
 $installText = [IO.File]::ReadAllText((Join-Path $root "install.ps1"), [Text.Encoding]::UTF8)
 [IO.File]::WriteAllText((Join-Path $dist "install.ps1"), $installText, (New-Object Text.UTF8Encoding($true)))
-Copy-Item (Join-Path $root "README.md"), (Join-Path $root "ANLEITUNG.md") $dist
+Copy-Item (Join-Path $root "README.md"), (Join-Path $root "ANLEITUNG.md"), (Join-Path $root "LICENSE"), (Join-Path $root "THIRD-PARTY-NOTICES.md") $dist
 $zip = Join-Path $dist "PLPilot.zip"
-Compress-Archive -Path (Join-Path $dist "PlugIns"), (Join-Path $dist "install.ps1"), (Join-Path $dist "README.md"), (Join-Path $dist "ANLEITUNG.md") -DestinationPath $zip
+Compress-Archive -Path (Join-Path $dist "PlugIns"), (Join-Path $dist "install.ps1"), (Join-Path $dist "README.md"), (Join-Path $dist "ANLEITUNG.md"), (Join-Path $dist "LICENSE"), (Join-Path $dist "THIRD-PARTY-NOTICES.md") -DestinationPath $zip
 Write-Host "== Done: $zip" -ForegroundColor Green
 
 if ($DeployTo) {
