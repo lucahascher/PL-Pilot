@@ -169,9 +169,10 @@ namespace PlsqlDevAgent.Agent
             new ChatCommand { Name = "test", Description = "Write a test block for the program unit",
                 Prompt = $"Write a test for {Target}: an anonymous PL/SQL block (or utPLSQL tests if the project already uses utPLSQL) covering normal cases, edge cases and expected errors. Look up the signatures and the tables first. Open the test in a new Test window. Do not execute anything that changes data without asking.\n\n$ARGUMENTS" },
             new ChatCommand { Name = "optimize", Description = "Analyse and improve performance (uses explain plan)",
-                Prompt = $"Analyse the performance of {Target}. Use explain_plan for the SQL statements and check the tables' indexes and sizes. Suggest concrete improvements (rewrites, indexes, bulk processing; hints only if justified) and explain the expected effect. Do not change anything yet.\n\n$ARGUMENTS" },
+                Prompt = $"Analyse the performance of {Target}. Use explain_plan for the SQL statements and check the tables' indexes and optimizer statistics (describe_object with include_statistics). Suggest concrete improvements (rewrites, indexes, bulk processing; hints only if justified) and explain the expected effect. Do not change anything yet.\n\n$ARGUMENTS" },
             new ChatCommand { Name = "fix", Description = "Compile the active editor and fix all errors",
-                Prompt = "Compile the code in the active editor and fix all compilation errors (edit the editor, then compile again) until it compiles cleanly. Explain briefly what was wrong.\n\n$ARGUMENTS" },
+                Prompt = "Compile the code in the active editor and fix all compilation errors (edit the editor, then compile again) until it compiles cleanly. " +
+                         "If a runtime error stack (ORA-06512 lines) is given below, resolve it with resolve_error_stack and fix the cause instead. Explain briefly what was wrong.\n\n$ARGUMENTS" },
             new ChatCommand { Name = "new", Description = "Start a new chat", Kind = "action" },
             new ChatCommand { Name = "compact", Description = "Summarize the conversation to free context", Kind = "action" },
             new ChatCommand { Name = "help", Description = "List the available commands", Kind = "action" },

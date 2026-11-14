@@ -388,6 +388,7 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
     <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Sub-task Max Steps</div><div class="s-desc">Model turns a helper agent (run_subtask) may use for its research.</div><input id="SubtaskMaxSteps" type="number" min="1"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Sub-task Model</div><div class="s-desc">Model for helper agents (run_subtask), e.g. a smaller, faster model of your server. Empty = the main model.</div><input id="SubtaskModel" list="models"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Max Query Rows</div><input id="MaxQueryRows" type="number" min="1"></div>
+    <div class="setting check"><div class="s-title"><span class="s-cat">Agent: </span>Compiler Warnings</div><label><input type="checkbox" id="CompilerWarnings"><span class="s-desc">When the agent compiles PL/SQL, the Oracle compiler warnings (PLSQL_WARNINGS) are turned on and reported to it. The unit keeps this setting; warnings your settings treat as errors stay errors.</span></label></div>
 
     <h4>Safety</h4>
     <div class="setting"><div class="s-title"><span class="s-cat">Safety: </span>Protected Connections</div><div class="s-desc">The agent is read-only on connections matching these patterns (user@database or database, wildcards * and ?, separated by ;). Can be unlocked per session in the chat header.</div><input id="ProtectedConnections" placeholder="*PROD*;*PRD*"></div>
@@ -547,7 +548,10 @@ const DE = {
   'Sub-task Model': 'Modell für Teilaufgaben', 'Model for helper agents (run_subtask), e.g. a smaller, faster model of your server. Empty = the main model.':
     'Modell für Hilfsagenten (run_subtask), z. B. ein kleineres, schnelleres Modell Ihres Servers. Leer = das Hauptmodell.',
   'Sub-task Max Steps': 'Max. Schritte für Teilaufgaben', 'Model turns a helper agent (run_subtask) may use for its research.': 'Modell-Durchläufe, die ein Hilfsagent (run_subtask) für seine Recherche nutzen darf.',
-  'Max Query Rows': 'Max. Abfragezeilen', 'Safety': 'Sicherheit', 'Safety:': 'Sicherheit:', 'Protected Connections': 'Geschützte Verbindungen',
+  'Max Query Rows': 'Max. Abfragezeilen', 'Compiler Warnings': 'Compiler-Warnungen',
+  'When the agent compiles PL/SQL, the Oracle compiler warnings (PLSQL_WARNINGS) are turned on and reported to it. The unit keeps this setting; warnings your settings treat as errors stay errors.':
+    'Wenn der Agent PL/SQL kompiliert, werden die Compiler-Warnungen von Oracle (PLSQL_WARNINGS) eingeschaltet und ihm gemeldet. Die Einheit behält diese Einstellung; Warnungen, die Ihre Einstellungen als Fehler behandeln, bleiben Fehler.',
+  'Safety': 'Sicherheit', 'Safety:': 'Sicherheit:', 'Protected Connections': 'Geschützte Verbindungen',
   'The agent is read-only on connections matching these patterns (user@database or database, wildcards * and ?, separated by ;). Can be unlocked per session in the chat header.':
     'Auf Verbindungen, die diesen Mustern entsprechen, darf der Agent nur lesen (benutzer@datenbank oder datenbank, Platzhalter * und ?, getrennt durch ;). Kann pro Sitzung im Chat-Kopf entsperrt werden.',
   'Backup Before Changes': 'Sicherung vor Änderungen', 'Save the database source before the agent replaces or drops a PL/SQL unit or view.':
@@ -1410,7 +1414,7 @@ function replay(events) {
 // ---------------------------------------------------------------- settings editor
 const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'CompactAtPercent', 'RequestTimeoutSeconds', 'ExtraBodyJson',
   'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
-  'MaxQueryRows', 'ProtectedConnections', 'BackupBeforeChanges',
+  'MaxQueryRows', 'CompilerWarnings', 'ProtectedConnections', 'BackupBeforeChanges',
   'SaveChatHistory', 'ChatHistoryContent', 'ChatRetentionDays', 'BackupRetentionDays', 'LogRetentionDays',
   'ReadOnlyMode', 'SeparateSession', 'UseDbaViews', 'AutoApproveEditorEdits', 'AutoApproveSql', 'AutoApproveFileWrites', 'DevTools', 'Theme', 'Language'];
 let settingsBase = {};

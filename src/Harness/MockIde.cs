@@ -63,7 +63,21 @@ namespace PlsqlDevAgent.Harness
             lock (ExecutedSql) ExecutedSql.Add(sql);
             var r = new QueryResult();
             var s = sql.ToUpperInvariant().Replace("DBA_", "ALL_"); // same canned answers with the DBA views setting
-            if (s.Contains("CURRENT_SCHEMA")) { r.Columns.Add("SCHEMA"); r.Rows.Add(new[] { "SCOTT" }); }
+            if (s.Contains("PRODUCT_COMPONENT_VERSION"))
+            {
+                r.Columns.AddRange(new[] { "PRODUCT", "VERSION_FULL" });
+                r.Rows.Add(new[] { "Oracle Database 19c Enterprise Edition", "19.24.0.0.0" });
+            }
+            else if (s.Contains("NLS_SESSION_PARAMETERS"))
+            {
+                r.Columns.AddRange(new[] { "PARAMETER", "VALUE" });
+                foreach (var p in new[] { "NLS_LANGUAGE|GERMAN", "NLS_TERRITORY|GERMANY", "NLS_DATE_FORMAT|DD.MM.RR", "NLS_NUMERIC_CHARACTERS|,.",
+                                          "NLS_LENGTH_SEMANTICS|BYTE", "NLS_CHARACTERSET|AL32UTF8", "EDITION|ORA$BASE" })
+                    r.Rows.Add(p.Split('|'));
+            }
+            // impact analysis and compiler settings: nothing depends on anything in the simulated database
+            else if (s.Contains("ALL_DEPENDENCIES") || s.Contains("ALL_PLSQL_OBJECT_SETTINGS") || s.Contains("V$PARAMETER")) r.Columns.Add("X");
+            else if (s.Contains("CURRENT_SCHEMA")) { r.Columns.Add("SCHEMA"); r.Rows.Add(new[] { "SCOTT" }); }
             else if (s.Contains("ALL_ERRORS")) { r.Columns.AddRange(new[] { "TYPE", "LINE", "POSITION", "ATTRIBUTE", "TEXT" }); }
             else if (s.Contains("COUNT(*)")) { r.Columns.Add("COUNT(*)"); r.Rows.Add(new[] { "14" }); }
             else if (s.Contains("FROM ALL_OBJECTS") && s.Contains(" LIKE "))

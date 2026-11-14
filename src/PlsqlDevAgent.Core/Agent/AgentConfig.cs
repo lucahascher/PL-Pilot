@@ -40,6 +40,8 @@ namespace PlsqlDevAgent.Agent
         /// <summary>Model for helper agents, e.g. a smaller, faster one; empty = the main model.</summary>
         public string SubtaskModel { get; set; } = "";
         public int MaxQueryRows { get; set; } = 200;
+        /// <summary>Compile with PLSQL_WARNINGS enabled and report the warnings to the model (the unit keeps that setting).</summary>
+        public bool CompilerWarnings { get; set; } = true;
         public int MaxToolOutputChars { get; set; } = 40000;
         /// <summary>Rough size budget of the conversation; older tool outputs are shortened above it.</summary>
         public int ContextBudgetChars { get; set; } = 300000;

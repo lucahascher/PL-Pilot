@@ -36,7 +36,10 @@ namespace PlsqlDevAgent.Agent
 - <attachments> after a user message contain sources or descriptions of objects/files the user referenced with @name. Use them instead of looking the same things up again.
 - Before you replace or drop a PL/SQL unit or view, the previous version is backed up automatically (see list_backups / restore_backup).
 - Your DML stays uncommitted in your own database session (DDL commits implicitly). The user sees uncommitted changes of your session with Commit / Rollback buttons in the chat; when your work leaves uncommitted changes, say so in your answer.
-- Use explain_plan for performance questions and get_result_grid when the user refers to the results of a query they ran.
+- Use explain_plan for performance questions, together with describe_object with include_statistics=true for the tables involved (row counts, column selectivity, histograms, index clustering factor, stale statistics). Use get_result_grid when the user refers to the results of a query they ran.
+- compile_plsql also reports Oracle's compiler warnings (PLW-…). Fix the warnings in code you wrote or changed; for warnings in code you did not touch, mention them briefly instead of changing that code, unless the user asked for a review or clean-up. compile_plsql keeps each unit's stored compiler settings (PLSQL_CCFLAGS, optimize level, native compilation, debug information).
+- Before you change a table, view, package specification, type or standalone procedure/function that other code may use, check the impact with find_dependencies (direction used_by; with column for a single table column). After compiling a specification, compile_plsql lists dependent objects that became INVALID; check with recompile_invalid that they still compile.
+- When the user pastes an Oracle error stack or log lines with ORA-06512 (or a DBMS_UTILITY.FORMAT_CALL_STACK), call resolve_error_stack first: it shows the source lines of every frame.
 
 # Longer tasks
 - For every task with 3 or more steps, first call update_tasks with a short plan (one task per step). Then work through it: keep exactly one task in_progress, mark it completed as soon as it is done (after verifying it, e.g. compiled without errors or a test query returned the expected result) and add tasks you discover. The user sees the list.
@@ -50,7 +53,7 @@ namespace PlsqlDevAgent.Agent
         /// The system prompt is kept stable for the whole conversation (so the LLM server can reuse its
         /// prompt cache); the changing IDE state is sent with every user message instead.
         /// </summary>
-        public static string Build(AgentConfig cfg, bool hasFileTools)
+        public static string Build(AgentConfig cfg, bool hasFileTools, DatabaseInfo database = null)
         {
             var sb = new StringBuilder();
             sb.Append(string.IsNullOrWhiteSpace(cfg.SystemPromptOverride) ? DefaultBasePrompt : cfg.SystemPromptOverride.Trim());
@@ -58,6 +61,7 @@ namespace PlsqlDevAgent.Agent
             if (cfg.UseDbaViews) sb.Append(DbaViews.PromptRule).Append('\n');
             if (!hasFileTools)
                 sb.Append("\nNo project folder is configured, so file tools are not available.\n");
+            if (database != null) sb.Append('\n').Append(database.PromptSection());
 
             var rules = RulesLoader.Load(cfg).Where(r => !string.IsNullOrWhiteSpace(r.Text)).ToList();
             if (rules.Count > 0)
@@ -77,7 +81,7 @@ namespace PlsqlDevAgent.Agent
         }
 
         /// <summary>System prompt of a helper agent (run_subtask).</summary>
-        public static string BuildSubtask(AgentConfig cfg)
+        public static string BuildSubtask(AgentConfig cfg, DatabaseInfo database = null)
         {
             var sb = new StringBuilder(
                 "You are a research helper of an AI coding agent that works inside PL/SQL Developer (Oracle). You get one task. " +
@@ -90,6 +94,7 @@ namespace PlsqlDevAgent.Agent
                 "prefer one targeted dictionary query over many small ones, and write the report as soon as you can answer " +
                 "the task. Keep the report short; quote only the code lines that matter.\n");
             if (cfg.UseDbaViews) sb.Append(DbaViews.PromptRule).Append('\n');
+            if (database != null) sb.Append('\n').Append(database.PromptSection());
             if (!string.IsNullOrWhiteSpace(cfg.ExtraInstructions))
                 sb.Append("\nProject conventions:\n").Append(cfg.ExtraInstructions.Trim()).Append('\n');
             return sb.ToString();

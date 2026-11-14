@@ -47,6 +47,7 @@ namespace PlsqlDevAgent.Testing
             else if (mode == "TXN-ONLY") await SqlRunAsync(plugin, transactionOnly: true);
             else if (mode == "TXN-CLOSE") await CloseWithTransactionAsync(plugin);
             else if (mode == "SEC-ONLY") await SqlRunAsync(plugin, securityOnly: true);
+            else if (mode == "ANALYSIS-ONLY") await AnalysisRunAsync(plugin);
             else await RunAsync(plugin);
         }
 
@@ -161,6 +162,162 @@ namespace PlsqlDevAgent.Testing
             {
                 File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
                 await CloseIde();
+            }
+        }
+
+        /// <summary>Only the analysis checks (database facts, compiler settings, dependencies, error stacks).</summary>
+        private static async Task AnalysisRunAsync(Plugin plugin)
+        {
+            try
+            {
+                Line("# PL/Pilot – analysis self test");
+                var c = plugin.Ide.GetContext();
+                Line($"IDE version {c.IdeVersion}, connection: {c.ConnectionLabel}");
+                var ctx = new ToolContext { Ide = plugin.Ide, Config = AgentConfig.Load(), RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+                await AnalysisChecks(ctx, plugin.Ide);
+                Line($"\n**Total: {_pass} passed, {_fail} failed**");
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
+        }
+
+        private static string AnalysisPackage(int variant) =>
+            "create or replace package pda_an_pkg is\n" +
+            (variant == 0 ? "  function total return pda_an_t.amount%type;\n"
+             : variant == 1 ? "  function total(p_min in number default null) return pda_an_t.amount%type;\n" : "") +
+            "  procedure div(p in number);\n" +
+            "  procedure show_stack;\n" +
+            "end pda_an_pkg;\n" +
+            "/\n" +
+            "create or replace package body pda_an_pkg is\n" +
+            (variant == 2 ? "" :
+            "  function total" + (variant == 1 ? "(p_min in number default null)" : "") + " return pda_an_t.amount%type is\n" +
+            "    l_sum pda_an_t.amount%type;\n" +
+            "  begin\n" +
+            "    select sum(amount) into l_sum from pda_an_t;\n" +
+            "    return l_sum;\n" +
+            "  end total;\n" +
+            "\n") +
+            "  procedure div(p in number) is\n" +
+            "    l number;\n" +
+            "  begin\n" +
+            "    l := 1 / p;\n" +
+            "  end div;\n" +
+            "\n" +
+            "  procedure show_stack is\n" +
+            "  begin\n" +
+            "    dbms_output.put_line(dbms_utility.format_call_stack);\n" +
+            "  end show_stack;\n" +
+            "end pda_an_pkg;\n" +
+            "/\n";
+
+        /// <summary>
+        /// Database facts for the system prompt, compiler settings kept and warnings reported, impact analysis,
+        /// recompiling invalidated objects and resolving error stacks, against the real database.
+        /// </summary>
+        private static async Task AnalysisChecks(ToolContext ctx, IIde ide)
+        {
+            Line("\n## 12. Database facts, compiler settings, impact analysis, error stacks");
+            var info = await Task.Run(() => DatabaseInfo.Load(ide));
+            var section = info?.PromptSection() ?? "";
+            Line("```\n" + section + "```");
+            Check($"database facts: version {info?.Version}, NLS settings and character set read",
+                info != null && info.Major >= 11 && section.Contains("NLS settings") && section.Contains("Character set"));
+            Check("system prompt contains the database section", SystemPrompt.Build(ctx.Config, false, info).Contains("# Connected database"));
+
+            var schema = await Task.Run(() => ctx.CurrentSchema);
+            async Task<string> Exec(string sql, string expect = null) => await Tool(ctx, "execute_sql", new JObject { ["sql"] = sql }, expect);
+            const string settingsProbe = "begin dbms_output.put_line('session: ccflags=[' || $$PLSQL_CCFLAGS || '] optimize=' || $$PLSQL_OPTIMIZE_LEVEL || ' warnings=' || $$PLSQL_WARNINGS); end;";
+            string SessionSettings(string execResult) => execResult.Substring(Math.Max(0, execResult.IndexOf("session:", StringComparison.Ordinal))).Trim();
+
+            foreach (var drop in new[] { "drop trigger pda_an_trg", "drop view pda_an_v2", "drop view pda_an_v", "drop procedure pda_an_p", "drop procedure pda_an_flags",
+                                         "drop procedure pda_an_warn", "drop package pda_an_pkg", "drop table pda_an_t purge" })
+                await Exec(drop);
+            try
+            {
+                Line("\n### Setup");
+                await Exec("create table pda_an_t (id number constraint pda_an_t_pk primary key, amount number(10,2), note varchar2(30))", "Executed successfully");
+                await Exec("begin\n  for i in 1 .. 100 loop insert into pda_an_t values (i, i * 10, case when mod(i, 10) = 0 then 'tenth' end); end loop;\n  commit;\n" +
+                           "  dbms_stats.gather_table_stats(user, 'PDA_AN_T');\nend;", "Executed successfully");
+                await Tool(ctx, "compile_plsql", new JObject { ["source"] = AnalysisPackage(0) }, "compiled successfully");
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace view pda_an_v as select id, note from pda_an_t\n/\n" +
+                                 "create or replace view pda_an_v2 as select id from pda_an_v\n/\n" +
+                                 "create or replace procedure pda_an_p is\n  l number;\nbegin\n  l := pda_an_pkg.total;\nend pda_an_p;\n/\n",
+                }, "compiled successfully");
+
+                Line("\n### Statistics and impact analysis");
+                var stats = await Tool(ctx, "describe_object", new JObject { ["name"] = "pda_an_t", ["include_statistics"] = true }, "CLUSTERING_FACTOR");
+                Check("statistics: table row count and column statistics", stats.Contains("Table statistics") && stats.Contains("NUM_DISTINCT") && stats.Contains("100"));
+                var usedBy = await Tool(ctx, "find_dependencies", new JObject { ["name"] = "pda_an_t" }, "PDA_AN_V");
+                // PDA_AN_P is a direct user as well: it calls a function returning PDA_AN_T.AMOUNT%TYPE
+                var level2 = usedBy.IndexOf("level 2:", StringComparison.Ordinal);
+                Check("find_dependencies: direct users on level 1, the view on the view on level 2",
+                    level2 > 0 && usedBy.IndexOf($"PROCEDURE {schema}.PDA_AN_P", StringComparison.Ordinal) is int p && p > 0 && p < level2 &&
+                    usedBy.IndexOf($"VIEW {schema}.PDA_AN_V2", StringComparison.Ordinal) > level2);
+                await Tool(ctx, "find_dependencies", new JObject { ["name"] = "pda_an_t", ["column"] = "amount" }, "sum(amount)");
+                await Tool(ctx, "find_dependencies", new JObject { ["name"] = "pda_an_p", ["direction"] = "uses" }, $"PACKAGE {schema}.PDA_AN_PKG");
+
+                Line("\n### Compiler warnings and settings");
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace procedure pda_an_warn is\n  l_x varchar2(10);\nbegin\n  select dummy into l_x from dual where dummy = 1;\n" +
+                                 "exception\n  when others then null;\nend pda_an_warn;",
+                }, "PLW-06009");
+                var before = SessionSettings(await Exec(settingsProbe, "session:"));
+                await Exec("create or replace procedure pda_an_flags is\nbegin\n  $if $$pda_flag $then dbms_output.put_line('flag on'); $else dbms_output.put_line('flag off'); $end\nend pda_an_flags;",
+                           "Executed successfully");
+                await Exec("alter procedure pda_an_flags compile plsql_ccflags = 'pda_flag:true' plsql_optimize_level = 1 reuse settings", "Executed successfully");
+                await Exec("begin pda_an_flags; end;", "flag on");
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace procedure pda_an_flags is\nbegin\n  -- changed by the agent\n  $if $$pda_flag $then dbms_output.put_line('flag on'); $else dbms_output.put_line('flag off'); $end\nend pda_an_flags;",
+                }, "compiled successfully");
+                await Exec("begin pda_an_flags; end;", "flag on");
+                await Tool(ctx, "run_query", new JObject { ["sql"] = "select plsql_ccflags, plsql_optimize_level from user_plsql_object_settings where name = 'PDA_AN_FLAGS'" }, "pda_flag:true");
+                var after = SessionSettings(await Exec(settingsProbe, "session:"));
+                Check($"the session's compiler settings are restored ({after})", before.Length > 8 && before == after);
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace procedure pda_an_flags is\nbegin\n  $if $$pda_flag $then dbms_output.put_line('flag on'); $else dbms_output.put_line('flag off'); $end\nend pda_an_flags;",
+                    ["keep_settings"] = false,
+                }, "compiled successfully");
+                await Exec("begin pda_an_flags; end;", "flag off");
+
+                Line("\n### Invalidated dependents and recompiling");
+                await Tool(ctx, "compile_plsql", new JObject { ["source"] = AnalysisPackage(1) }, $"PROCEDURE {schema}.PDA_AN_P");
+                await Tool(ctx, "recompile_invalid", new JObject { ["objects"] = new JArray($"PROCEDURE {schema}.PDA_AN_P") }, "1 valid now");
+                await Tool(ctx, "compile_plsql", new JObject { ["source"] = AnalysisPackage(2) }, "became INVALID");
+                await Tool(ctx, "recompile_invalid", new JObject { ["objects"] = new JArray("PDA_AN_P") }, "still INVALID");
+                await Tool(ctx, "compile_plsql", new JObject { ["source"] = AnalysisPackage(0) }, "compiled successfully");
+                await Tool(ctx, "recompile_invalid", new JObject { ["objects"] = new JArray("PDA_AN_P") }, "valid now");
+
+                Line("\n### Error stacks");
+                var divLine = AnalysisPackage(0).Split(new[] { "/\n" }, StringSplitOptions.None)[1].Trim('\n').Split('\n')
+                    .Select((l, i) => (l, i)).First(x => x.l.Contains("1 / p")).i + 1;
+                var failed = await Exec("begin pda_an_pkg.div(0); end;", "ORA-01476");
+                await Tool(ctx, "resolve_error_stack", new JObject { ["error_stack"] = failed }, ">> " + divLine.ToString().PadLeft(5) + " |     l := 1 / p;");
+                await Tool(ctx, "resolve_error_stack", new JObject
+                {
+                    ["error_stack"] = $"FEHLER in Zeile 1:\nORA-01476: Divisor ist Null\nORA-06512: in \"{schema}.PDA_AN_PKG\", Zeile {divLine}\nORA-06512: in Zeile 1",
+                }, ", in DIV (nearest declaration above the line)");
+                var stack = await Exec("begin pda_an_pkg.show_stack; end;", "PL/SQL Call Stack");
+                await Tool(ctx, "resolve_error_stack", new JObject { ["error_stack"] = stack }, "dbms_utility.format_call_stack");
+                await Exec("create or replace trigger pda_an_trg\nbefore insert on pda_an_t\nfor each row\ndeclare\n  l number;\nbegin\n  l := 1;\n" +
+                           "  if :new.id < 0 then\n    raise_application_error(-20001, 'negative id');\n  end if;\nend;", "Executed successfully");
+                var trg = await Exec("insert into pda_an_t (id) values (-1)", "ORA-20001");
+                await Tool(ctx, "resolve_error_stack", new JObject { ["error_stack"] = trg }, "= source line 9");
+            }
+            finally
+            {
+                foreach (var drop in new[] { "drop trigger pda_an_trg", "drop view pda_an_v2", "drop view pda_an_v", "drop procedure pda_an_p", "drop procedure pda_an_flags",
+                                             "drop procedure pda_an_warn", "drop package pda_an_pkg", "drop table pda_an_t purge" })
+                    await Exec(drop);
             }
         }
 
@@ -657,6 +814,7 @@ namespace PlsqlDevAgent.Testing
                 await RewindChecks(ide, cfg);
                 await TransactionChecks(ide, cfg);
                 await SecurityChecks(ide, cfg);
+                await AnalysisChecks(ctx, ide);
                 Line($"\n**Tool tests: {_pass} passed, {_fail} failed**");
 
                 var prompt = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PROMPT");

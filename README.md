@@ -43,9 +43,15 @@ It was written for locked-down company PCs: it installs **without administrator 
 ## Highlights
 
 - **Works where you work.** Edits the active SQL/Program/Test/Command window with a diff, opens objects,
-  reads the result grid of your last query, compiles into the database and loops until the code compiles.
-- **Knows your database.** Describes tables and packages, searches source code, reads object DDL, runs
-  `EXPLAIN PLAN`, lists compile errors — and attaches objects or files you mention with `@NAME`.
+  reads the result grid of your last query, compiles into the database and loops until the code compiles —
+  seeing Oracle's compiler warnings, and keeping each unit's compiler settings (`PLSQL_CCFLAGS`, native
+  compilation, debug information).
+- **Knows your database.** Knows the Oracle version and NLS settings of the connection, describes tables
+  (with optimizer statistics) and packages, searches source code, reads object DDL, runs `EXPLAIN PLAN`, lists
+  compile errors — and attaches objects or files you mention with `@NAME`.
+- **Impact analysis and error stacks.** Shows what uses an object, down to the source lines that use a single
+  column; names the objects a change invalidated and recompiles them. Paste an error stack (`ORA-06512` lines in
+  any language, or a call stack) and it shows the source line of every frame.
 - **You stay in control.** Every change needs your approval; you can revert single edits or *rewind* the
   whole task back to any message or step. Uncommitted DML is shown with Commit / Rollback buttons.
 - **Safe around production.** Connections that look like production are read-only for the agent,
@@ -124,8 +130,8 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 |---|---|
 | Planning | `update_tasks`, `run_subtask` |
 | IDE | `get_ide_context`, `get_editor_text`, `get_selected_text`, `edit_editor`, `set_editor_text`, `open_new_window`, `open_object`, `get_result_grid` |
-| Database (read) | `run_query`, `list_objects`, `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `list_backups` |
-| Database (change, with approval) | `compile_plsql`, `execute_sql`, `restore_backup` |
+| Database (read) | `run_query`, `list_objects`, `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `find_dependencies`, `resolve_error_stack`, `list_backups` |
+| Database (change, with approval) | `compile_plsql`, `execute_sql`, `recompile_invalid`, `restore_backup` |
 | Project folder (optional) | `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `open_file_in_ide` |
 
 ## Safety model
@@ -189,6 +195,10 @@ Most settings are self-explanatory in the settings page; a few worth knowing:
 - **Use DBA views** makes every query of the agent read `DBA_` instead of `ALL_` dictionary views (falls
   back to `ALL_` without `SELECT_CATALOG_ROLE`).
 - **Sub-task model** lets helper agents use a smaller, faster model.
+- **Compiler warnings** (on by default): the agent's compiles run with `PLSQL_WARNINGS` enabled (except a few
+  noisy ones such as PLW-05018) and the warnings are reported to the model. The unit keeps that warnings
+  setting; qualifiers it already had, such as `ERROR:06002`, stay in force. All other compiler settings of a
+  unit are kept either way.
 - **HTTPS:** certificates are validated against the Windows certificate store; if your company CA is not
   installed, the connection test shows the reason and the thumbprints you can trust under
   *Trusted Certificates*. **Use System Proxy** applies the Windows proxy settings.
@@ -217,7 +227,7 @@ syntax-check the chat page.
   (exactly as shown in the chat header), then start PL/SQL Developer logged on, e.g.
   `plsqldev.exe userid=scott/tiger@localhost:1521/FREEPDB1`. It writes `report.md` and closes the IDE; it
   refuses to run on any other or on a protected connection. Quick modes via
-  `PLSQLDEVAGENT_AUTOTEST_PROMPT`: `SQL-ONLY`, `REWIND-ONLY`, `TXN-ONLY`, `TXN-CLOSE`, `SEC-ONLY`,
+  `PLSQLDEVAGENT_AUTOTEST_PROMPT`: `SQL-ONLY`, `REWIND-ONLY`, `TXN-ONLY`, `TXN-CLOSE`, `SEC-ONLY`, `ANALYSIS-ONLY`,
   `ENC-ONLY`, `HTTPS-ONLY`.
 - A local test database: `docker run -d -p 1521:1521 -e ORACLE_PASSWORD=<pwd> -e APP_USER=scott -e APP_USER_PASSWORD=tiger gvenzl/oracle-free:23-slim-faststart`
   (PL/SQL Developer needs an Oracle client; the Instant Client is enough).

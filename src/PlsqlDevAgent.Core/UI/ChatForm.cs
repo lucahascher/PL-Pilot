@@ -527,7 +527,10 @@ namespace PlsqlDevAgent.UI
                     previewCfg.UpdateFromUi((JObject)msg["config"]);
                     Task.Run(() =>
                     {
-                        var text = SystemPrompt.Build(previewCfg, previewCfg.HasWorkspace);
+                        DatabaseInfo database = null;
+                        try { database = _session.Database(); }
+                        catch (Exception ex) { Log.Warn("Prompt preview without database facts: " + ex.Message); }
+                        var text = SystemPrompt.Build(previewCfg, previewCfg.HasWorkspace, database);
                         Post(new JObject { ["type"] = "prompt_preview", ["text"] = text, ["chars"] = text.Length, ["tokens"] = (int)(text.Length / 3.5) }, false);
                     });
                     break;

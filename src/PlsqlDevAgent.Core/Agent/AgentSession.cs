@@ -127,7 +127,51 @@ namespace PlsqlDevAgent.Agent
             _systemPrompt = null; // rebuilt with the next message
         }
 
-        public void OnConnectionChanged() => _ctx.ResetSchemaCache();
+        public void OnConnectionChanged()
+        {
+            _ctx.ResetSchemaCache();
+            lock (_databaseLock)
+            {
+                _databaseGeneration++;
+                _database = null;
+                _databaseLoaded = false;
+            }
+            _systemPrompt = null; // the next model call gets the facts of the new database
+        }
+
+        private readonly object _databaseLock = new object();
+        private DatabaseInfo _database;
+        private bool _databaseLoaded;
+        private int _databaseGeneration;
+
+        /// <summary>
+        /// Version, NLS settings and character set of the connected database for the system prompt; read once per
+        /// connection (null if not connected or not readable). <paramref name="load"/> = false never queries the
+        /// database (callers on the UI thread).
+        /// </summary>
+        public DatabaseInfo Database(bool load = true)
+        {
+            int generation;
+            lock (_databaseLock)
+            {
+                if (_databaseLoaded || !load) return _database;
+                generation = _databaseGeneration;
+            }
+            DatabaseInfo info = null;
+            try
+            {
+                if (_ide.GetContext().Connected) info = DatabaseInfo.Load(_ide);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { Log.Warn("Database facts for the system prompt could not be read: " + ex.Message); }
+            lock (_databaseLock)
+            {
+                if (generation != _databaseGeneration) return info; // the connection changed meanwhile: do not cache
+                _database = info;
+                _databaseLoaded = true;
+                return info;
+            }
+        }
 
         public GuardState CurrentGuard()
         {
@@ -282,8 +326,6 @@ namespace PlsqlDevAgent.Agent
             var guard = CurrentGuard();
             var tools = AvailableTools(guard, planMode);
             var toolSchemas = new JArray(tools.Select(t => t.ToOpenAiTool()));
-            if (_systemPrompt == null) _systemPrompt = SystemPrompt.Build(Config, Config.HasWorkspace);
-
             var notes = new List<string>();
             while (_notes.TryDequeue(out var n)) notes.Add(n);
             string contextBlock;
@@ -326,6 +368,8 @@ namespace PlsqlDevAgent.Agent
                 await MaybeCompactAsync(ct).ConfigureAwait(false);
 
                 var messageId = "m" + Guid.NewGuid().ToString("N").Substring(0, 10);
+                // rebuilt after a connection change (other database version / NLS settings)
+                if (_systemPrompt == null) _systemPrompt = SystemPrompt.Build(Config, Config.HasWorkspace, Database());
                 var messages = BuildMessages();
                 int sentChars = CharCount(messages);
                 _ui.AssistantStart(messageId);
@@ -445,7 +489,7 @@ namespace PlsqlDevAgent.Agent
             catch { }
             var messages = new JArray
             {
-                new JObject { ["role"] = "system", ["content"] = SystemPrompt.BuildSubtask(Config) },
+                new JObject { ["role"] = "system", ["content"] = SystemPrompt.BuildSubtask(Config, Database()) },
                 new JObject { ["role"] = "user", ["content"] = context + "Task: " + task },
             };
             // optionally a smaller / faster model for the research
@@ -704,7 +748,8 @@ namespace PlsqlDevAgent.Agent
                 }
             }
 
-            var messages = new JArray { new JObject { ["role"] = "system", ["content"] = _systemPrompt ?? SystemPrompt.Build(Config, Config.HasWorkspace) } };
+            // may run on the UI thread (token estimate): never reads the database here
+            var messages = new JArray { new JObject { ["role"] = "system", ["content"] = _systemPrompt ?? SystemPrompt.Build(Config, Config.HasWorkspace, Database(load: false)) } };
             foreach (var m in _history) messages.Add(m.DeepClone());
             return messages;
         }

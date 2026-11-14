@@ -268,11 +268,14 @@ namespace PlsqlDevAgent.Agent.Tools
             new SearchSourceTool(),
             new GetCompileErrorsTool(),
             new ExplainPlanTool(),
+            new FindDependenciesTool(),
+            new ResolveErrorStackTool(),
             new GetResultGridTool(),
             new ListBackupsTool(),
             // Database (write)
             new CompilePlsqlTool(),
             new ExecuteSqlTool(),
+            new RecompileInvalidTool(),
             new RestoreBackupTool(),
             // Files
             new ListFilesTool(),

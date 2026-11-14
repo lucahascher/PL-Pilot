@@ -63,6 +63,20 @@ und angezeigt). Noch nicht festgeschriebene Datenänderungen (INSERT/UPDATE/DELE
 zurückgenommen; nach einem Commit – auch dem automatischen durch DDL wie CREATE OR REPLACE – geht das nicht mehr,
 ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer geschlossen wird.
 
+**Fehler und Abhängigkeiten:**
+
+- **Fehler-Stack einfügen:** Einen Fehler aus einem Log oder Aufruf (Zeilen mit `ORA-06512: in "…", Zeile …`,
+  auch englisch oder als `DBMS_UTILITY.FORMAT_CALL_STACK`) in den Chat kopieren – PL/Pilot zeigt zu jeder Zeile
+  den Quelltext und die Prozedur, in der sie steht (bei Triggern mit umgerechneter Zeilennummer).
+- **Wer verwendet das?** Fragen wie „Was ist betroffen, wenn ich die Spalte BETRAG in AUFTRAG ändere?“
+  beantwortet er aus dem Data Dictionary (`find_dependencies`), bis hinunter zu den Quelltextzeilen einer Spalte.
+  Werden durch eine Änderung andere Objekte ungültig, nennt er sie und kann sie neu kompilieren.
+- **Compiler-Warnungen:** Beim Kompilieren sieht der Agent die Warnungen von Oracle (z. B. PLW-06009
+  *OTHERS-Handler ohne RAISE*). Einstellungen wie `PLSQL_CCFLAGS`, Optimierungsstufe, native Kompilierung und
+  Debug-Informationen behält jede Einheit dabei. Abschaltbar unter **Einstellungen → Agent → Compiler-Warnungen**.
+- PL/Pilot kennt die **Oracle-Version** und die **NLS-Einstellungen** (z. B. Dezimalkomma) der Verbindung und
+  schreibt Code passend dazu.
+
 ## Sicherheit
 
 - **Geschützte Verbindungen:** Auf Verbindungen, deren Name zu einem Muster passt (Standard `*PROD*;*PRD*`),

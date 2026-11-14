@@ -157,6 +157,7 @@ namespace PlsqlDevAgent.Util
             ["{0} (current)"] = "{0} (aktuell)",
             ["{0} (proposed)"] = "{0} (Vorschlag)",
             ["Restore {0} from backup {1} ({2})"] = "{0} aus Sicherung {1} wiederherstellen ({2})",
+            ["Recompile {0} invalid objects ({1})"] = "{0} ungültige Objekte neu kompilieren ({1})",
             ["Current database version"] = "Aktuelle Datenbankversion",
             ["Backup {0}"] = "Sicherung {0}",
             ["{0}/{1} done"] = "{0}/{1} erledigt",

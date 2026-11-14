@@ -162,6 +162,36 @@ namespace PlsqlDevAgent.Agent.Tools
             return Regex.Replace(text, @"^create\s+(or\s+replace\s+)?((non)?editionable\s+)?", "", RegexOptions.IgnoreCase).ToUpperInvariant();
         }
 
+        /// <summary>Compiler errors and warnings of a unit (ALL_ERRORS), formatted separately.</summary>
+        public sealed class CompileDiagnostics
+        {
+            public string Errors, Warnings;
+            public int WarningCount;
+        }
+
+        public static CompileDiagnostics Diagnostics(ToolContext ctx, string owner, string name, string type, int maxWarnings = 25)
+        {
+            var r = ctx.Ide.Query(
+                "select type, line, position, attribute, asciistr(text) from all_errors where owner = " + Lit(owner) +
+                " and name = " + Lit(name) + (type != null ? " and type = " + Lit(type) : "") + " order by type, sequence", 300);
+            var errors = new StringBuilder();
+            var warnings = new StringBuilder();
+            int count = 0;
+            foreach (var row in r.Rows)
+            {
+                var line = $"{row[0]} line {row[1]}, col {row[2]}: {UnAsciiStr(row[4]).Trim()}\n";
+                if (row[3] != "WARNING") errors.Append(line);
+                else if (++count <= maxWarnings) warnings.Append(line);
+            }
+            if (count > maxWarnings) warnings.Append($"... and {count - maxWarnings} more warnings (get_compile_errors lists all).\n");
+            return new CompileDiagnostics
+            {
+                Errors = errors.Length > 0 ? errors.ToString() : null,
+                Warnings = warnings.Length > 0 ? warnings.ToString() : null,
+                WarningCount = count,
+            };
+        }
+
         public static string Errors(ToolContext ctx, string owner, string name, string type)
         {
             var sql = "select type, line, position, attribute, asciistr(text) from all_errors where owner = " + Lit(owner) +
@@ -250,11 +280,14 @@ namespace PlsqlDevAgent.Agent.Tools
         public override string Description =>
             "Describes a table or view (columns with types, nullability, comments, primary/unique/foreign keys, indexes) " +
             "or the subprograms and parameters of a package, procedure, function or type. Use this before writing SQL " +
-            "against a table or calling a package.";
+            "against a table or calling a package. For performance work set include_statistics.";
         public override JObject Parameters => Schema(
             Req("name", "string", "Object name, optionally OWNER.NAME."),
-            Opt("object_type", "string", "Optional type to disambiguate."));
-        public override string Summarize(JObject args) => Str(args, "name");
+            Opt("object_type", "string", "Optional type to disambiguate."),
+            Opt("include_statistics", "boolean", "Tables and materialized views: also the optimizer statistics – row count, " +
+                "last analyzed, stale or locked statistics, partitioning, per column distinct values / nulls / histogram, per " +
+                "index status, height, clustering factor. Default false."));
+        public override string Summarize(JObject args) => Str(args, "name") + (Bool(args, "include_statistics", false) ? " (statistics)" : "");
 
         public override Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
@@ -265,7 +298,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 case "TABLE":
                 case "VIEW":
                 case "MATERIALIZED VIEW":
-                    DescribeTable(ctx, obj, sb);
+                    DescribeTable(ctx, obj, sb, obj.Type != "VIEW" && Bool(args, "include_statistics", false));
                     break;
                 case "PACKAGE":
                 case "PROCEDURE":
@@ -285,7 +318,7 @@ namespace PlsqlDevAgent.Agent.Tools
             return Task.FromResult(Db.Truncate(sb.ToString(), ctx.Config.MaxToolOutputChars));
         }
 
-        private static void DescribeTable(ToolContext ctx, Db.ObjRef obj, StringBuilder sb)
+        private static void DescribeTable(ToolContext ctx, Db.ObjRef obj, StringBuilder sb, bool statistics)
         {
             string o = Lit(obj.Owner), n = Lit(obj.Name);
             var comment = ctx.Ide.Query($"select comments from all_tab_comments where owner = {o} and table_name = {n}", 1);
@@ -326,11 +359,80 @@ namespace PlsqlDevAgent.Agent.Tools
                 if (cons.Rows.Count > 0) sb.Append("\nConstraints:\n").Append(FormatResult(cons, 20000)).Append('\n');
             }
 
+            if (statistics)
+            {
+                AppendStatistics(ctx, obj, sb);
+                return;
+            }
             var idx = ctx.Ide.Query(
                 "select i.index_name, i.uniqueness, (select listagg(ic.column_name, ', ') within group (order by ic.column_position) " +
                 "from all_ind_columns ic where ic.index_owner = i.owner and ic.index_name = i.index_name) columns " +
                 $"from all_indexes i where i.table_owner = {o} and i.table_name = {n} order by i.index_name", 100);
             if (idx.Rows.Count > 0) sb.Append("\nIndexes:\n").Append(FormatResult(idx, 10000)).Append('\n');
+        }
+
+        /// <summary>Optimizer statistics of a table: what the optimizer believes about its size and selectivity.</summary>
+        private static void AppendStatistics(ToolContext ctx, Db.ObjRef obj, StringBuilder sb)
+        {
+            string o = Lit(obj.Owner), n = Lit(obj.Name);
+            var table = Section(ctx, sb, "Table statistics (optimizer statistics as of LAST_ANALYZED, not live counts)",
+                "select s.num_rows, s.blocks, s.avg_row_len, to_char(s.last_analyzed, 'YYYY-MM-DD HH24:MI') last_analyzed, " +
+                "s.stale_stats, s.stattype_locked locked, t.partitioned, t.temporary, t.iot_type, trim(t.degree) degree " +
+                "from all_tables t left join all_tab_statistics s on s.owner = t.owner and s.table_name = t.table_name and s.object_type = 'TABLE' " +
+                $"where t.owner = {o} and t.table_name = {n}", 1);
+            if (table != null && table.Rows.Count > 0 && table.Rows[0][6] == "YES")
+            {
+                Section(ctx, sb, "Partitioning",
+                    "select p.partitioning_type, p.subpartitioning_type, p.partition_count, " +
+                    "(select listagg(k.column_name, ', ') within group (order by k.column_position) from all_part_key_columns k " +
+                    "  where k.owner = p.owner and k.name = p.table_name and k.object_type = 'TABLE') partition_key " +
+                    $"from all_part_tables p where p.owner = {o} and p.table_name = {n}", 1);
+            }
+
+            Section(ctx, sb, "Column statistics",
+                "select c.column_name, s.num_distinct, s.num_nulls, s.histogram, s.num_buckets " +
+                "from all_tab_columns c left join all_tab_col_statistics s on s.owner = c.owner and s.table_name = c.table_name and s.column_name = c.column_name " +
+                $"where c.owner = {o} and c.table_name = {n} order by c.column_id", 1000);
+
+            const string indexColumns =
+                "(select listagg(ic.column_name, ', ') within group (order by ic.column_position) " +
+                "from all_ind_columns ic where ic.index_owner = i.owner and ic.index_name = i.index_name) columns";
+            var idx = Section(ctx, sb, "Indexes with statistics",
+                $"select i.index_name, i.index_type, i.uniqueness, {indexColumns}, i.status, i.visibility, i.partitioned, " +
+                "i.blevel, i.leaf_blocks, i.distinct_keys, i.clustering_factor, i.num_rows, to_char(i.last_analyzed, 'YYYY-MM-DD') last_analyzed " +
+                $"from all_indexes i where i.table_owner = {o} and i.table_name = {n} order by i.index_name", 100,
+                // before 11g there is no VISIBILITY column
+                $"select i.index_name, i.index_type, i.uniqueness, {indexColumns}, i.status, i.partitioned, " +
+                "i.blevel, i.leaf_blocks, i.distinct_keys, i.clustering_factor, i.num_rows, to_char(i.last_analyzed, 'YYYY-MM-DD') last_analyzed " +
+                $"from all_indexes i where i.table_owner = {o} and i.table_name = {n} order by i.index_name");
+            sb.Append("\nHints: STALE_STATS = YES or no LAST_ANALYZED means missing or outdated statistics. A CLUSTERING_FACTOR near BLOCKS " +
+                      "means the table is ordered like the index (range scans are cheap), near NUM_ROWS that it is not. " +
+                      "A column histogram (FREQUENCY, HYBRID, HEIGHT BALANCED, TOP-FREQUENCY) lets the optimizer see skewed values. " +
+                      "STATUS UNUSABLE: the index is not used and DML on the table may fail.\n");
+            if (idx != null && idx.Rows.Count == 0) sb.Append("The table has no indexes.\n");
+        }
+
+        /// <summary>Appends a titled query result; null (and a short note) if the query fails, e.g. on an old Oracle version.</summary>
+        private static QueryResult Section(ToolContext ctx, StringBuilder sb, string title, string sql, int maxRows, string fallbackSql = null)
+        {
+            QueryResult r;
+            try { r = ctx.Ide.Query(sql, maxRows); }
+            catch (OracleSqlException ex)
+            {
+                if (fallbackSql == null)
+                {
+                    sb.Append($"\n{title}: not available ({ex.Message.Split('\n')[0]})\n");
+                    return null;
+                }
+                try { r = ctx.Ide.Query(fallbackSql, maxRows); }
+                catch (OracleSqlException ex2)
+                {
+                    sb.Append($"\n{title}: not available ({ex2.Message.Split('\n')[0]})\n");
+                    return null;
+                }
+            }
+            if (r.Rows.Count > 0) sb.Append($"\n{title}:\n").Append(FormatResult(r, 30000)).Append('\n');
+            return r;
         }
 
         private static void DescribeProgram(ToolContext ctx, Db.ObjRef obj, StringBuilder sb)
@@ -509,10 +611,14 @@ namespace PlsqlDevAgent.Agent.Tools
         public override string Description =>
             "Compiles PL/SQL into the database by executing CREATE OR REPLACE statements (package spec/body, procedure, " +
             "function, trigger, type, view). Several units may be given separated by a line containing only '/'. " +
-            "Returns compilation errors with line numbers. The user must approve. Typical use: compile the code you " +
-            "wrote in the editor (pass the full editor text) and fix errors until it compiles cleanly.";
+            "Returns compilation errors and compiler warnings (PLW-) with line numbers, and dependent objects that became " +
+            "invalid. Each unit keeps the compiler settings stored with it (PLSQL_CCFLAGS, optimize level, native " +
+            "compilation, debug information). The user must approve. Typical use: compile the code you wrote in the " +
+            "editor (pass the full editor text) and fix errors until it compiles cleanly.";
         public override JObject Parameters => Schema(
-            Req("source", "string", "Complete CREATE OR REPLACE source of one or more units ('/' line between units)."));
+            Req("source", "string", "Complete CREATE OR REPLACE source of one or more units ('/' line between units)."),
+            Opt("keep_settings", "boolean", "Default true. false: compile with the compiler settings of your session instead " +
+                "(only after you changed them on purpose, e.g. ALTER SESSION SET PLSQL_CCFLAGS)."));
         public override bool Mutating => true;
 
         public override string Summarize(JObject args)
@@ -547,13 +653,16 @@ namespace PlsqlDevAgent.Agent.Tools
                 if (!approval.Approved) return approval.RejectionMessage;
             }
 
-            return Compile(ctx, parts, "compile");
+            return Compile(ctx, parts, "compile", Bool(args, "keep_settings", true));
         }
 
-        /// <summary>Executes CREATE OR REPLACE statements (backing up the previous versions) and reports errors.</summary>
-        internal static string Compile(ToolContext ctx, List<string> parts, string reason)
+        /// <summary>
+        /// Executes CREATE OR REPLACE statements (backing up the previous versions, keeping the units' compiler
+        /// settings) and reports errors, warnings and dependent objects that became invalid.
+        /// </summary>
+        internal static string Compile(ToolContext ctx, List<string> parts, string reason, bool keepSettings = true)
         {
-            var sb = new StringBuilder();
+            var units = new List<(string Stmt, string Type, string Owner, string Name)>();
             foreach (var part in parts)
             {
                 var stmt = PrepareStatement(part);
@@ -565,24 +674,43 @@ namespace PlsqlDevAgent.Agent.Tools
                     owner = vm.Groups["o"].Success ? Ident(vm.Groups["o"].Value) : null;
                     name = vm.Success ? Ident(vm.Groups["n"].Value) : "?";
                 }
-                owner = owner ?? ctx.CurrentSchema;
-                var pending = Db.BeforeChange(ctx, type, owner, name, reason, stmt);
-                var res = ctx.Ide.Execute(stmt);
-                var backupNote = pending.Backup == null ? "" : $" (previous version backed up as {pending.Backup.Id})";
-                if (res.Ok || res.CompiledWithErrors)
+                units.Add((stmt, type, owner ?? ctx.CurrentSchema, name));
+            }
+
+            // a changed specification, type or view can invalidate the objects that use it
+            var watch = new Dependencies.InvalidationWatch(ctx, units.Select(u => (u.Owner, u.Name, u.Type)));
+            var sb = new StringBuilder();
+            using (var settings = new CompilerSettingsScope(ctx, keepSettings))
+            {
+                foreach (var (stmt, type, owner, name) in units)
                 {
-                    Db.AfterChange(ctx, pending);
-                    var errors = type == "VIEW" ? null : Db.Errors(ctx, owner, name, type);
-                    ctx.Ide.RefreshObject(type, owner, name, 2);
-                    sb.Append(errors == null
-                        ? $"{type} {owner}.{name}: compiled successfully{backupNote}.\n"
-                        : $"{type} {owner}.{name}: COMPILED WITH ERRORS{backupNote} (line numbers are relative to the CREATE statement):\n{errors}\n");
-                }
-                else
-                {
-                    sb.Append($"{type} {owner}.{name}: FAILED: {res.ErrorMessage}\n");
+                    var pending = Db.BeforeChange(ctx, type, owner, name, reason, stmt);
+                    if (type != "VIEW") settings.Prepare(type, owner, name);
+                    var res = ctx.Ide.Execute(stmt);
+                    var backupNote = pending.Backup == null ? "" : $" (previous version backed up as {pending.Backup.Id})";
+                    if (res.Ok || res.CompiledWithErrors)
+                    {
+                        Db.AfterChange(ctx, pending);
+                        var diag = type == "VIEW" ? new Db.CompileDiagnostics() : Db.Diagnostics(ctx, owner, name, type);
+                        ctx.Ide.RefreshObject(type, owner, name, 2);
+                        if (diag.Errors != null)
+                        {
+                            sb.Append($"{type} {owner}.{name}: COMPILED WITH ERRORS{backupNote} (line numbers are relative to the CREATE statement):\n{diag.Errors}");
+                            if (diag.WarningCount > 0) sb.Append($"(plus {diag.WarningCount} compiler warnings; fix the errors first)\n");
+                            sb.Append('\n');
+                        }
+                        else if (diag.Warnings != null)
+                            sb.Append($"{type} {owner}.{name}: compiled successfully{backupNote}, with {diag.WarningCount} compiler warning{(diag.WarningCount == 1 ? "" : "s")}:\n{diag.Warnings}\n");
+                        else
+                            sb.Append($"{type} {owner}.{name}: compiled successfully{backupNote}.\n");
+                    }
+                    else
+                    {
+                        sb.Append($"{type} {owner}.{name}: FAILED: {res.ErrorMessage}\n");
+                    }
                 }
             }
+            sb.Append(watch.Report());
             return sb.ToString().TrimEnd();
         }
     }
@@ -679,7 +807,17 @@ namespace PlsqlDevAgent.Agent.Tools
                 }
             }
 
-            var res = ctx.Ide.Execute(sql);
+            ExecResult res;
+            if (IsPlsqlUnit(sql, out var ut, out var uo, out var un))
+            {
+                // like compile_plsql: the unit keeps its stored compiler settings
+                using (var settings = new CompilerSettingsScope(ctx))
+                {
+                    settings.Prepare(ut, uo ?? ctx.CurrentSchema, un);
+                    res = ctx.Ide.Execute(sql);
+                }
+            }
+            else res = ctx.Ide.Execute(sql);
             if (res.Ok || res.CompiledWithErrors)
             {
                 foreach (var p in pending) Db.AfterChange(ctx, p);
@@ -697,7 +835,16 @@ namespace PlsqlDevAgent.Agent.Tools
             var backup = pending.Select(p => p.Backup).FirstOrDefault(b => b != null);
             var sb = new StringBuilder();
             if (backup != null) sb.Append($"(Previous version backed up as {backup.Id}.) ");
+            Db.CompileDiagnostics diag = null;
+            if (res.CompiledWithErrors && IsPlsqlUnit(sql, out var dt, out var dow, out var dn))
+            {
+                // ORA-24344 also comes for warnings only
+                try { diag = Db.Diagnostics(ctx, dow ?? ctx.CurrentSchema, dn, dt); }
+                catch (OracleSqlException) { }
+            }
             if (res.Ok) sb.Append("Executed successfully.");
+            else if (diag != null && diag.Errors == null)
+                sb.Append($"Executed successfully, with {diag.WarningCount} compiler warning{(diag.WarningCount == 1 ? "" : "s")}:\n{diag.Warnings}");
             else if (res.CompiledWithErrors) sb.Append("Executed, but the object has compilation errors (use get_compile_errors).");
             else sb.Append("FAILED: ").Append(res.ErrorMessage);
             if (!string.IsNullOrWhiteSpace(res.DbmsOutput)) sb.Append("\nDBMS_OUTPUT:\n").Append(Db.Truncate(res.DbmsOutput, ctx.Config.MaxToolOutputChars));
