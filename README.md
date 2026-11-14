@@ -255,6 +255,10 @@ code page (1252 includes ä ö ü ß € „“ – …) everywhere. Common symb
   and its SQL runs on the IDE main thread.
 - Rewind information is lost when PL/SQL Developer is closed.
 
+## AI usage during development
+
+For full transparency: almost the entire codebase was created by Claude Code using Opus 5.5 I only directed and created the architecture and tested the results.
+
 ## Contributing
 
 Issues and pull requests are welcome. Please describe the PL/SQL Developer and Oracle versions and, for
