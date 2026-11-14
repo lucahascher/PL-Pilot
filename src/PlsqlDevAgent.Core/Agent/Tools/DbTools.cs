@@ -599,9 +599,24 @@ namespace PlsqlDevAgent.Agent.Tools
                 return Task.FromResult(r.Rows.Count == 0 ? "No compilation errors in schema " + ctx.CurrentSchema + "." : FormatResult(r, ctx.Config.MaxToolOutputChars, 500));
             }
             SplitName(name, out var owner, out var n);
-            var type = Str(args, "object_type");
-            var errors = Db.Errors(ctx, owner ?? ctx.CurrentSchema, n, string.IsNullOrWhiteSpace(type) ? null : type.Trim().ToUpperInvariant());
-            return Task.FromResult(errors ?? "No compilation errors.");
+            owner = owner ?? ctx.CurrentSchema;
+            var given = Str(args, "object_type");
+            var type = string.IsNullOrWhiteSpace(given) ? null : Regex.Replace(given.Trim().ToUpperInvariant(), @"\s+", " ");
+            // a package or type means specification and body: the errors are usually in the body
+            var errors = type == "PACKAGE" || type == "TYPE"
+                ? (Db.Errors(ctx, owner, n, type) ?? "") + (Db.Errors(ctx, owner, n, type + " BODY") ?? "")
+                : Db.Errors(ctx, owner, n, type);
+            if (!string.IsNullOrEmpty(errors)) return Task.FromResult(errors);
+
+            // no errors recorded, but the object can still be INVALID (invalidated by a change of an object it uses)
+            var status = ctx.Ide.Query(
+                $"select object_type, status from all_objects where owner = {Lit(owner)} and object_name = {Lit(n)} " +
+                "and object_type in ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'TYPE', 'TYPE BODY', 'VIEW') order by object_type", 10);
+            if (status.Rows.Count == 0) return Task.FromResult($"No object {owner}.{n} found (check the name with list_objects).");
+            var invalid = status.Rows.Where(r => r[1] == "INVALID").Select(r => r[0]).ToList();
+            if (invalid.Count == 0) return Task.FromResult("No compilation errors; " + string.Join(", ", status.Rows.Select(r => r[0])) + " VALID.");
+            return Task.FromResult($"No compilation errors are recorded, but {string.Join(" and ", invalid)} {owner}.{n} is INVALID: an object it uses " +
+                                   "was changed or is invalid itself. recompile_invalid compiles it again and shows the real errors.");
         }
     }
 
@@ -745,6 +760,10 @@ namespace PlsqlDevAgent.Agent.Tools
             var sql = PrepareStatement(ReqStr(args, "sql"));
             if (sql.Length == 0) return "Nothing to execute.";
             var kw = FirstKeyword(sql);
+            // several statements fail in the database anyway: say so before the user is asked to approve them
+            if (!IsPlsqlBlock(sql) && kw != "WITH" && Regex.IsMatch(StripStringsAndComments(sql), @";\s*\S"))
+                return "Not executed: execute_sql runs exactly ONE statement, but this text contains several (separated by ';'). " +
+                       "Send each statement in its own execute_sql call (several calls in one response are fine), or put DML into one BEGIN … END block.";
             bool returnsRows = kw == "SELECT" || kw == "WITH";
             // only a plain query skips the approval: a "query" with PL/SQL in its WITH clause can change and commit data
             bool readOnlyQuery = returnsRows && IsReadOnlyQuery(sql, out _);

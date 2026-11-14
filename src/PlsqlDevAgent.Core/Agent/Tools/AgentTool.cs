@@ -128,6 +128,20 @@ namespace PlsqlDevAgent.Agent.Tools
         /// <summary>Current production guard state (null = no guard, e.g. in tests).</summary>
         public Func<GuardState> Guard;
 
+        /// <summary>The agent runs in plan mode: nothing may be changed, not even temporarily.</summary>
+        public bool PlanMode;
+
+        /// <summary>
+        /// Why a statement that changes data must not run now (plan mode, read-only or protected connection);
+        /// null if it may run (with the user's approval).
+        /// </summary>
+        public string ChangeBlockedReason()
+        {
+            if (PlanMode) return "the agent is in PLAN MODE";
+            var guard = Guard?.Invoke();
+            return guard != null && guard.ReadOnly ? "the agent is " + guard.Describe() : null;
+        }
+
         /// <summary>Stores the agent's task list (update_tasks).</summary>
         public Action<JArray> SetTasks;
 
@@ -268,6 +282,7 @@ namespace PlsqlDevAgent.Agent.Tools
             new SearchSourceTool(),
             new GetCompileErrorsTool(),
             new ExplainPlanTool(),
+            new MeasureSqlTool(),
             new FindDependenciesTool(),
             new ResolveErrorStackTool(),
             new GetResultGridTool(),
@@ -276,6 +291,7 @@ namespace PlsqlDevAgent.Agent.Tools
             new CompilePlsqlTool(),
             new ExecuteSqlTool(),
             new RecompileInvalidTool(),
+            new RunUnitTestsTool(),
             new RestoreBackupTool(),
             // Files
             new ListFilesTool(),

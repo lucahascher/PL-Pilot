@@ -326,6 +326,7 @@ namespace PlsqlDevAgent.Agent
             var guard = CurrentGuard();
             var tools = AvailableTools(guard, planMode);
             var toolSchemas = new JArray(tools.Select(t => t.ToOpenAiTool()));
+            _ctx.PlanMode = planMode; // read-only tools that could change data (measure_sql with DML) check it
             var notes = new List<string>();
             while (_notes.TryDequeue(out var n)) notes.Add(n);
             string contextBlock;
@@ -386,6 +387,14 @@ namespace PlsqlDevAgent.Agent
                          $"tools [{string.Join(", ", turn.ToolCalls.Select(c => c.Name))}], finish={turn.FinishReason ?? "-"}" +
                          (turn.Usage != null ? $", usage {turn.Usage.ToString(Formatting.None)}" : ""));
                 ReportUsage(turn, sentChars);
+
+                if (turn.FinishReason == "repetition")
+                {
+                    // the model is stuck repeating itself: keep one copy and stop, continuing would only repeat the loop
+                    _history.Add(new JObject { ["role"] = "assistant", ["content"] = turn.Content ?? "" });
+                    _ui.Notice(L.T("The model kept repeating the same text and was stopped. Rephrase the request, split it into smaller steps or use a larger model."));
+                    break;
+                }
 
                 var assistant = new JObject { ["role"] = "assistant" };
                 if (turn.ToolCalls.Count > 0)
@@ -639,8 +648,41 @@ namespace PlsqlDevAgent.Agent
 
         private int EstimateTokens() => (int)(CharCount(BuildMessages()) * _tokensPerChar) + 2000; // + tool schemas
 
+        private readonly HashSet<string> _contextChecked = new HashSet<string>();
+
+        /// <summary>
+        /// After the model's first answer (now the server has loaded it, e.g. Ollama with its real context size):
+        /// asks the server once per server and model and corrects the setting "Context Window" (saved, with a notice).
+        /// </summary>
+        private void CheckContextWindowOnce()
+        {
+            var cfg = Config;
+            if (!cfg.DetectContextWindow) return;
+            var key = cfg.BaseUrl + "|" + cfg.Model;
+            lock (_contextChecked) if (!_contextChecked.Add(key)) return;
+            Task.Run(async () =>
+            {
+                try
+                {
+                    ContextWindowInfo info;
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                        info = await ContextWindowDetector.DetectAsync(_client, cfg, cfg.Model, cts.Token).ConfigureAwait(false);
+                    var value = info.SettingFor(cfg.ContextWindowTokens);
+                    if (value == null || !ReferenceEquals(cfg, Config)) return; // unchanged, or the settings were changed meanwhile
+                    int before = cfg.ContextWindowTokens;
+                    cfg.ContextWindowTokens = value.Value;
+                    if (!cfg.SessionOnly) cfg.Save();
+                    Log.Info($"Context window of {cfg.Model}: {before} -> {value} tokens ({info.Source})");
+                    _ui.Notice(L.T("Context window set to {0:N0} tokens (was {1:N0}): {2} reports this size for {3}.", value.Value, before, L.T(info.Source), cfg.Model));
+                    _ui.ContextUsage(EstimateTokens(), cfg.ContextWindowTokens, true);
+                }
+                catch (Exception ex) { Log.Warn("Context window check failed: " + ex.Message); }
+            });
+        }
+
         private void ReportUsage(AssistantTurn turn, int sentChars)
         {
+            CheckContextWindowOnce();
             int prompt = (int?)turn.Usage?["prompt_tokens"] ?? 0;
             int completion = (int?)turn.Usage?["completion_tokens"] ?? 0;
             if (prompt > 0 && sentChars > 0)

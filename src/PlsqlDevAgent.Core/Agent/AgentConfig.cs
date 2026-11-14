@@ -55,6 +55,10 @@ namespace PlsqlDevAgent.Agent
         public string CustomCommands { get; set; } = "";
         /// <summary>Context window of the model in tokens (for the meter and automatic compaction).</summary>
         public int ContextWindowTokens { get; set; } = 131072;
+        /// <summary>Ask the server for the model's context window (Test, model change, first answer) and set ContextWindowTokens.</summary>
+        public bool DetectContextWindow { get; set; } = true;
+        /// <summary>Changed for this session only (test hook): never written to config.json.</summary>
+        [JsonIgnore] public bool SessionOnly { get; set; }
         /// <summary>Summarize older messages when the conversation exceeds this share of the context window (0 = never).</summary>
         public int CompactAtPercent { get; set; } = 80;
         /// <summary>Ask the server for token usage in streaming responses (stream_options.include_usage).</summary>

@@ -166,10 +166,18 @@ namespace PlsqlDevAgent.Agent
                 Prompt = $"Review {Target} like a senior Oracle developer: bugs and edge cases, error handling, transaction handling, performance (SQL in loops, missing bulk operations, implicit conversions, non-sargable predicates), security (dynamic SQL, SQL injection) and readability. Look up the tables and objects it uses. List the findings ordered by severity with line references and concrete fixes. Do not change anything yet.\n\n$ARGUMENTS" },
             new ChatCommand { Name = "document", Description = "Add header comments / documentation",
                 Prompt = $"Add or improve documentation comments in {Target}: a header comment for each program unit (purpose, parameters, return value, raised exceptions) in the existing comment style and language. Do not change any logic.\n\n$ARGUMENTS" },
-            new ChatCommand { Name = "test", Description = "Write a test block for the program unit",
-                Prompt = $"Write a test for {Target}: an anonymous PL/SQL block (or utPLSQL tests if the project already uses utPLSQL) covering normal cases, edge cases and expected errors. Look up the signatures and the tables first. Open the test in a new Test window. Do not execute anything that changes data without asking.\n\n$ARGUMENTS" },
-            new ChatCommand { Name = "optimize", Description = "Analyse and improve performance (uses explain plan)",
-                Prompt = $"Analyse the performance of {Target}. Use explain_plan for the SQL statements and check the tables' indexes and optimizer statistics (describe_object with include_statistics). Suggest concrete improvements (rewrites, indexes, bulk processing; hints only if justified) and explain the expected effect. Do not change anything yet.\n\n$ARGUMENTS" },
+            new ChatCommand { Name = "test", Description = "Write unit tests for the program unit (utPLSQL if installed)",
+                Prompt = $"Write unit tests for {Target} covering normal cases, edge cases and expected errors. Look up the signatures, the tables and existing tests (list_objects UT%) first. " +
+                         "If utPLSQL is installed (see the system prompt): create a utPLSQL v3 test package following the project's naming convention (default UT_<unit>), compile it with compile_plsql, " +
+                         "run it with run_unit_tests (with coverage_objects for the unit under test) and fix the tests until they pass. " +
+                         "Test data belongs into the test package: insert the rows the tests need in --%beforeall / --%beforeeach procedures (or in the test itself) - utPLSQL rolls them back after the tests. " +
+                         "Never delete, update or commit existing data to prepare a test, and do not run setup statements with execute_sql. " +
+                         "If a test reveals a bug in the tested code, report it and let the test document it; do not change the tested code unless the user asks. " +
+                         "Without utPLSQL: write an anonymous PL/SQL block that creates its own test data, checks the results, ends with ROLLBACK, and open it in a new Test window.\n\n$ARGUMENTS" },
+            new ChatCommand { Name = "optimize", Description = "Analyse and improve performance (measures the statements)",
+                Prompt = $"Analyse the performance of {Target}. Use explain_plan for the SQL statements and check the tables' indexes and optimizer statistics (describe_object with include_statistics). " +
+                         "Measure the expensive queries with measure_sql (actual plan: compare E-Rows with A-Rows). Suggest concrete improvements (rewrites, indexes, bulk processing; hints only if justified); " +
+                         "for a rewritten query, prove it with measure_sql and compare_sql (runs=2): same rows and the numbers before and after. Do not change anything yet.\n\n$ARGUMENTS" },
             new ChatCommand { Name = "fix", Description = "Compile the active editor and fix all errors",
                 Prompt = "Compile the code in the active editor and fix all compilation errors (edit the editor, then compile again) until it compiles cleanly. " +
                          "If a runtime error stack (ORA-06512 lines) is given below, resolve it with resolve_error_stack and fix the cause instead. Explain briefly what was wrong.\n\n$ARGUMENTS" },

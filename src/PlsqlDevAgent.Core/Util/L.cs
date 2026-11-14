@@ -57,8 +57,28 @@ namespace PlsqlDevAgent.Util
             ["Rolled back the changes of the agent."] = "Änderungen des Agents verworfen (Rollback).",
             ["The connection changed while the agent session had uncommitted changes ({0}). PL/SQL Developer has closed that session: check whether they were saved."] =
                 "Die Verbindung wurde gewechselt, während die Sitzung des Agents nicht festgeschriebene Änderungen hatte ({0}). PL/SQL Developer hat diese Sitzung geschlossen: Bitte prüfen, ob sie gespeichert wurden.",
-            ["The database session of PL/Pilot has uncommitted changes:\n\n{0}\n\nCommit them?\nYes = Commit, No = Rollback, Cancel = do not close PL/SQL Developer"] =
-                "Die Datenbanksitzung von PL/Pilot hat nicht festgeschriebene Änderungen:\n\n{0}\n\nFestschreiben?\nJa = Commit, Nein = Rollback, Abbrechen = PL/SQL Developer nicht schließen",
+            ["The database session of PL/Pilot has uncommitted changes:\n\n{0}\n\nCommit them or roll them back before PL/SQL Developer closes?"] =
+                "Die Datenbanksitzung von PL/Pilot hat nicht festgeschriebene Änderungen:\n\n{0}\n\nVor dem Schließen von PL/SQL Developer festschreiben (Commit) oder verwerfen (Rollback)?",
+            ["Commit"] = "Festschreiben (Commit)",
+            ["Roll back"] = "Verwerfen (Rollback)",
+            ["Do not close"] = "Nicht schließen",
+            ["The model kept repeating the same text and was stopped. Rephrase the request, split it into smaller steps or use a larger model."] =
+                "Das Modell hat immer wieder denselben Text wiederholt und wurde gestoppt. Formulieren Sie die Anfrage um, teilen Sie sie in kleinere Schritte oder verwenden Sie ein größeres Modell.",
+            // context window detection
+            ["Context window set to {0:N0} tokens (was {1:N0}): {2} reports this size for {3}."] =
+                "Kontextfenster auf {0:N0} Tokens gesetzt (vorher {1:N0}): {2} meldet diese Größe für {3}.",
+            ["LM Studio (model loaded)"] = "LM Studio (Modell geladen)",
+            ["model list of the server"] = "Modellliste des Servers",
+            ["model list of the server (maximum)"] = "Modellliste des Servers (Maximum)",
+            ["Ollama, model loaded"] = "Ollama, Modell geladen",
+            ["Ollama, num_ctx of the model"] = "Ollama, num_ctx des Modells",
+            ["Ollama, model not loaded"] = "Ollama, Modell nicht geladen",
+            ["LM Studio, model loaded"] = "LM Studio, Modell geladen",
+            ["Ollama sets the size when it loads the model (OLLAMA_CONTEXT_LENGTH or its default); PL/Pilot checks it again after the model's first answer."] =
+                "Ollama legt die Größe beim Laden des Modells fest (OLLAMA_CONTEXT_LENGTH oder Standardwert); PL/Pilot prüft sie nach der ersten Antwort des Modells erneut.",
+            ["LM Studio sets the size when it loads the model; PL/Pilot checks it again after the model's first answer."] =
+                "LM Studio legt die Größe beim Laden des Modells fest; PL/Pilot prüft sie nach der ersten Antwort des Modells erneut.",
+            ["Close anyway"] = "Trotzdem schließen",
             ["(open transaction)"] = "(offene Transaktion)",
             ["Roll back the data changes of: {0}"] = "Datenänderungen zurücknehmen: {0}",
             ["the same transaction contains later changes that are not part of this rewind (e.g. from another chat)"] = "dieselbe Transaktion enthält spätere Änderungen, die nicht zurückgespult werden (z. B. aus einem anderen Chat)",
@@ -158,6 +178,10 @@ namespace PlsqlDevAgent.Util
             ["{0} (proposed)"] = "{0} (Vorschlag)",
             ["Restore {0} from backup {1} ({2})"] = "{0} aus Sicherung {1} wiederherstellen ({2})",
             ["Recompile {0} invalid objects ({1})"] = "{0} ungültige Objekte neu kompilieren ({1})",
+            ["Measure in database ({0}), changes are rolled back"] = "In der Datenbank messen ({0}), Änderungen werden zurückgerollt",
+            ["The statement is executed and rolled back afterwards. Effects outside the transaction remain, e.g. used sequence values and autonomous transactions in triggers."] =
+                "Die Anweisung wird ausgeführt und danach zurückgerollt. Wirkungen außerhalb der Transaktion bleiben, z. B. verbrauchte Sequenzwerte und autonome Transaktionen in Triggern.",
+            ["Run unit tests ({0}): {1}"] = "Unit-Tests ausführen ({0}): {1}",
             ["Current database version"] = "Aktuelle Datenbankversion",
             ["Backup {0}"] = "Sicherung {0}",
             ["{0}/{1} done"] = "{0}/{1} erledigt",
@@ -171,8 +195,8 @@ namespace PlsqlDevAgent.Util
             ["Explain what the selected code / active editor does"] = "Erklären, was der markierte Code bzw. der aktive Editor macht",
             ["Code review: bugs, performance, security, style"] = "Code-Review: Fehler, Performance, Sicherheit, Stil",
             ["Add header comments / documentation"] = "Kopfkommentare / Dokumentation ergänzen",
-            ["Write a test block for the program unit"] = "Testblock für die Programmeinheit schreiben",
-            ["Analyse and improve performance (uses explain plan)"] = "Performance analysieren und verbessern (mit Explain Plan)",
+            ["Write unit tests for the program unit (utPLSQL if installed)"] = "Unit-Tests für die Programmeinheit schreiben (utPLSQL, falls installiert)",
+            ["Analyse and improve performance (measures the statements)"] = "Performance analysieren und verbessern (misst die Anweisungen)",
             ["Compile the active editor and fix all errors"] = "Aktiven Editor kompilieren und alle Fehler beheben",
             ["Start a new chat"] = "Neuen Chat beginnen",
             ["Summarize the conversation to free context"] = "Unterhaltung zusammenfassen, um Kontext freizugeben",

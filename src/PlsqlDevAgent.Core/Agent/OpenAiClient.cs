@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
@@ -214,6 +215,7 @@ namespace PlsqlDevAgent.Agent
             var content = new StringBuilder();
             var reasoning = new StringBuilder();
             bool inThinkTag = false;
+            var repetition = new RepetitionDetector();
 
             using (var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
             using (ct.Register(() => { try { stream.Dispose(); } catch { } }))
@@ -255,7 +257,15 @@ namespace PlsqlDevAgent.Agent
                         // Some servers inline the chain of thought as <think>...</think>.
                         SplitThink(c, ref inThinkTag, out var visible, out var thought);
                         if (thought.Length > 0) { reasoning.Append(thought); sink?.OnReasoning(thought); }
+                        visible = StripControlTokens(visible);
                         if (visible.Length > 0) { content.Append(visible); sink?.OnContent(visible); }
+                        if (repetition.IsLooping(content))
+                        {
+                            // stop reading: closing the response makes the server stop generating
+                            turn.FinishReason = "repetition";
+                            content.Length = repetition.CutAt;
+                            break;
+                        }
                     }
 
                     if (delta["tool_calls"] is JArray tcs)
@@ -289,10 +299,87 @@ namespace PlsqlDevAgent.Agent
                 }
             }
 
-            turn.Content = content.ToString();
+            // a control token split across two chunks only shows up in the whole text
+            turn.Content = StripControlTokens(content.ToString());
             turn.Reasoning = reasoning.ToString();
             turn.ToolCalls = calls.Values.Where(c => !string.IsNullOrEmpty(c.Name)).ToList();
             return turn;
+        }
+
+        /// <summary>
+        /// Template tokens some models leak into the answer (e.g. gemma's "&lt;channel|&gt;", "&lt;|im_end|&gt;"): not shown,
+        /// and not sent back to the model, where they can derail it further. Only tags with a "|" are matched.
+        /// </summary>
+        private static readonly Regex ControlToken = new Regex(
+            @"<\|(?:channel|message|start|end|constrain|return|call|im_start|im_end|im_sep|eot_id|eom_id|start_header_id|end_header_id|start_of_turn|end_of_turn|endoftext|turn)\|?>" +
+            @"|<(?:channel|message|start_of_turn|end_of_turn|turn)\|>", RegexOptions.Compiled);
+
+        internal static string StripControlTokens(string text) =>
+            string.IsNullOrEmpty(text) || text.IndexOf('|') < 0 ? text : ControlToken.Replace(text, "");
+
+        /// <summary>
+        /// Recognizes a model that is stuck repeating itself (small local models do: hundreds of times the same sentence)
+        /// so the answer can be stopped instead of streaming until the token limit.
+        /// </summary>
+        internal sealed class RepetitionDetector
+        {
+            private const int SameLines = 8, MinLineLength = 10, Periods = 8, MinPeriod = 20, MaxPeriod = 300;
+            private int _checkedAt;
+
+            /// <summary>Length to keep: the text up to and including the first repetition.</summary>
+            public int CutAt { get; private set; }
+
+            public bool IsLooping(StringBuilder text)
+            {
+                if (text.Length - _checkedAt < 120) return false; // checked every ~120 new characters
+                _checkedAt = text.Length;
+                var tail = text.ToString(Math.Max(0, text.Length - 4000), Math.Min(4000, text.Length));
+                int offset = text.Length - tail.Length;
+
+                // the same line again and again (blank lines in between do not count); the last element after the
+                // final line break may be incomplete and is not looked at
+                var lines = tail.Split('\n');
+                string key = null;
+                int count = 0, first = -1;
+                for (int i = lines.Length - 2; i >= 0; i--)
+                {
+                    var line = lines[i].Trim();
+                    if (line.Length == 0) continue;
+                    if (key == null)
+                    {
+                        if (line.Length < MinLineLength || !Words(line)) break;
+                        key = line;
+                    }
+                    else if (line != key) break;
+                    count++;
+                    first = i;
+                }
+                if (count >= SameLines)
+                {
+                    int end = 0; // end of the first of the repeated lines, including its line break
+                    for (int i = 0; i <= first; i++) end += lines[i].Length + 1;
+                    CutAt = offset + end;
+                    return true;
+                }
+
+                // the same piece of text without line breaks
+                for (int p = MinPeriod; p <= MaxPeriod && p * Periods <= tail.Length; p++)
+                {
+                    int from = tail.Length - p * Periods;
+                    bool periodic = true;
+                    for (int k = from + p; k < tail.Length; k++)
+                        if (tail[k] != tail[k - p]) { periodic = false; break; }
+                    if (periodic && Words(tail.Substring(tail.Length - p)))
+                    {
+                        CutAt = offset + from + p; // one copy of the repeated piece stays
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            /// <summary>Real text, not a separator line like "-----" or "| --- |".</summary>
+            private static bool Words(string s) => s.Count(char.IsLetter) >= 6 && s.Where(char.IsLetter).Select(char.ToLowerInvariant).Distinct().Count() >= 4;
         }
 
         private static AssistantTurn ParseCompletion(JObject json, IStreamSink sink)
@@ -306,7 +393,7 @@ namespace PlsqlDevAgent.Agent
             turn.Reasoning = (string)msg["reasoning_content"] ?? (string)msg["reasoning"] ?? "";
             bool inThink = false;
             SplitThink((string)msg["content"] ?? "", ref inThink, out var visible, out var thought);
-            turn.Content = visible;
+            turn.Content = StripControlTokens(visible);
             turn.Reasoning += thought;
             if (turn.Reasoning.Length > 0) sink?.OnReasoning(turn.Reasoning);
             if (turn.Content.Length > 0) sink?.OnContent(turn.Content);
@@ -378,6 +465,36 @@ namespace PlsqlDevAgent.Agent
             catch (HttpRequestException ex)
             {
                 throw ConnectionError(cfg.ModelsUrl, ex);
+            }
+        }
+
+        /// <summary>
+        /// A JSON request to a server-specific endpoint (e.g. Ollama's /api/ps) with the same TLS, proxy and API key
+        /// handling as the chat requests; null if it fails in any way (other server type, 404, timeout).
+        /// </summary>
+        internal async Task<JToken> TryJsonAsync(AgentConfig cfg, HttpMethod method, string url, JObject body, TimeSpan timeout, CancellationToken ct)
+        {
+            try
+            {
+                using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    cts.CancelAfter(timeout);
+                    var request = new HttpRequestMessage(method, url);
+                    if (!string.IsNullOrEmpty(cfg.ApiKey))
+                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cfg.ApiKey);
+                    if (body != null) request.Content = new StringContent(body.ToString(Formatting.None), Encoding.UTF8, "application/json");
+                    using (var response = await Http(cfg).SendAsync(request, cts.Token).ConfigureAwait(false))
+                    {
+                        if (!response.IsSuccessStatusCode) return null;
+                        var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        return JToken.Parse(text);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; } // timeout of this request
+            catch (Exception ex) when (ex is HttpRequestException || ex is JsonException || ex is InvalidOperationException)
+            {
+                return null;
             }
         }
 

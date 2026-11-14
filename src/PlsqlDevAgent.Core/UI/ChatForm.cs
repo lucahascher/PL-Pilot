@@ -539,6 +539,10 @@ namespace PlsqlDevAgent.UI
                     SaveSettings((JObject)msg["config"]);
                     break;
 
+                case "detect_context":
+                    DetectContext((JObject)msg["config"]);
+                    break;
+
                 case "test_connection":
                     TestConnection((JObject)msg["config"]);
                     break;
@@ -1046,17 +1050,53 @@ namespace PlsqlDevAgent.UI
             {
                 try
                 {
+                    List<string> models;
                     using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
-                    {
-                        var models = await _testClient.ListModelsAsync(cfg, cts.Token);
-                        Post(new JObject { ["type"] = "test_result", ["ok"] = true, ["models"] = new JArray(models) }, false);
-                    }
+                        models = await _testClient.ListModelsAsync(cfg, cts.Token);
+                    // the page fills in the first model if none is set: detect the context window of that one
+                    var model = string.IsNullOrWhiteSpace(cfg.Model) ? models.FirstOrDefault() : cfg.Model;
+                    var context = await DetectContextAsync(cfg, model);
+                    Post(new JObject { ["type"] = "test_result", ["ok"] = true, ["models"] = new JArray(models), ["context"] = context }, false);
                 }
                 catch (Exception ex)
                 {
                     var message = ex is TaskCanceledException ? L.T("Timed out after 20 s.") : ex.GetBaseException().Message;
                     Post(new JObject { ["type"] = "test_result", ["ok"] = false, ["error"] = message }, false);
                 }
+            });
+        }
+
+        /// <summary>The context window the server reports for <paramref name="model"/>, for the settings page (null if unknown).</summary>
+        private async Task<JObject> DetectContextAsync(AgentConfig cfg, string model)
+        {
+            try
+            {
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                {
+                    var info = await ContextWindowDetector.DetectAsync(_testClient, cfg, model, cts.Token);
+                    if (!info.Known) return null;
+                    var json = info.ToJson();
+                    json["model"] = model;
+                    json["setting"] = info.SettingFor(cfg.ContextWindowTokens);
+                    return json;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Context window detection failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>The model was changed in the settings page: detect its context window.</summary>
+        private void DetectContext(JObject ui)
+        {
+            var cfg = _config.Clone();
+            cfg.UpdateFromUi(ui);
+            Task.Run(async () =>
+            {
+                var context = await DetectContextAsync(cfg, cfg.Model);
+                Post(new JObject { ["type"] = "context_info", ["model"] = cfg.Model, ["context"] = context }, false);
             });
         }
 
@@ -1102,10 +1142,14 @@ namespace PlsqlDevAgent.UI
             });
         }
 
+        /// <summary>Test hook: stops the agent like the Stop button.</summary>
+        public void StopForTest() => _session.Cancel();
+
         /// <summary>Test hook: changes the configuration for this session only (not saved).</summary>
         public void ApplyConfigForTest(Action<AgentConfig> change)
         {
             change(_config);
+            _config.SessionOnly = true; // e.g. a test model: automatic changes must not be saved either
             _session.UpdateConfig(_config);
         }
 

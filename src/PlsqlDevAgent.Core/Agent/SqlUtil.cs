@@ -199,7 +199,7 @@ namespace PlsqlDevAgent.Agent
             return v.Length > max ? v.Substring(0, max) + "…" : v;
         }
 
-        private static string StripStringsAndComments(string sql)
+        internal static string StripStringsAndComments(string sql)
         {
             var s = Regex.Replace(sql ?? "", @"'([^']|'')*'", "''");
             s = Regex.Replace(s, @"--[^\n]*", "");

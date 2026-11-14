@@ -174,7 +174,7 @@ namespace PlsqlDevAgent.Harness
                 if (_prompt.StartsWith("Please improve"))
                 {
                     if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SecurityUiChecks(); await PromptChecks(); }
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -206,6 +206,42 @@ namespace PlsqlDevAgent.Harness
             log.WriteLine($"TOTAL: {_pass} passed, {_fail} failed");
             File.WriteAllText(Path.Combine(_autoTestDir, "autotest.log"), log.ToString());
             Application.Exit();
+        }
+
+        /// <summary>
+        /// Context window detection: the mock server reports max_model_len per model like vLLM (mock-deepseek 65,536,
+        /// mock-other 32,768).
+        /// </summary>
+        private async Task ContextWindowChecks()
+        {
+            // the notice is gone by now (later checks reopen chats): the saved setting shows it
+            Check("after the first answer the context window is taken from the server and saved (65,536)", AgentConfig.Load().ContextWindowTokens == 65536);
+            Plugin.Instance.OnMenuClick(Bootstrap.MiSettings);
+            await Task.Delay(800);
+            await Js("document.getElementById('Model').value = 'mock-other'; document.getElementById('Model').dispatchEvent(new Event('change'))");
+            await Task.Delay(2000);
+            var field = await Js("document.getElementById('ContextWindowTokens').value + ' | ' + document.getElementById('ctxDetect').innerText");
+            Check($"changing the model in the settings fills in its context window ({field})", field.StartsWith("32768") && field.Contains("32,768"));
+            await Js("document.getElementById('DetectContextWindow').checked = false; document.getElementById('ContextWindowTokens').value = 100000; " +
+                     "document.getElementById('Model').value = 'mock-deepseek'; document.getElementById('Model').dispatchEvent(new Event('change'))");
+            await Task.Delay(2000);
+            field = await Js("document.getElementById('ContextWindowTokens').value + ' | ' + document.getElementById('ctxDetect').innerText");
+            Check($"with detection switched off the value is only shown, not changed ({field})", field.StartsWith("100000") && field.Contains("65,536"));
+            await Js("closeSettings()"); // not saved
+        }
+
+        /// <summary>A model repeating itself is stopped after a few repetitions; leaked template tokens are not shown.</summary>
+        private async Task LoopChecks()
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await SendAndWait("LOOPTEST");
+            var text = await Js("document.getElementById('messages').innerText");
+            int start = text.LastIndexOf("LOOPTEST", StringComparison.Ordinal);
+            var segment = start >= 0 ? text.Substring(start) : text;
+            int repeats = System.Text.RegularExpressions.Regex.Matches(segment, "I will now recreate the packages").Count;
+            Check($"a repeating model is stopped early ({repeats} repetitions shown, {sw.Elapsed.TotalSeconds:0} s)", repeats >= 1 && repeats <= 14);
+            Check("the user is told why it stopped", segment.Contains("kept repeating"));
+            Check("leaked template tokens are not shown", !segment.Contains("<channel|>") && segment.Contains("Let me check the packages."));
         }
 
         private async Task FeatureChecks()

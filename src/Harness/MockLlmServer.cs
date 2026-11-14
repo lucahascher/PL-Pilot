@@ -72,7 +72,7 @@ namespace PlsqlDevAgent.Harness
                 if (requestLine.StartsWith("GET") && requestLine.Contains("/models"))
                 {
                     await WriteAll(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n" +
-                        "{\"data\":[{\"id\":\"mock-deepseek\"},{\"id\":\"mock-other\"}]}");
+                        "{\"data\":[{\"id\":\"mock-deepseek\",\"max_model_len\":65536},{\"id\":\"mock-other\",\"max_model_len\":32768}]}");
                     return;
                 }
 
@@ -127,6 +127,10 @@ namespace PlsqlDevAgent.Harness
                 bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);
                 return done ? Final("Done.") : ToolCall("es_" + messages.Count, "execute_sql", new JObject { ["sql"] = exec.Groups[1].Value });
             }
+
+            // a small model stuck in a loop, with a leaked template token (gemma: "<channel|>")
+            if (request.Contains("LOOPTEST"))
+                return Final("Let me check the packages.<channel|>\n" + string.Concat(Enumerable.Repeat("I will now recreate the packages.\n", 200)));
 
             // README demo: a realistic task from reading the editor to compiling
             if (request.Contains("list_emps is slow"))

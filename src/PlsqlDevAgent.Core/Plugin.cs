@@ -132,12 +132,30 @@ namespace PlsqlDevAgent
             else if (_ide.IsExecutingSql) question = L.T("PL/Pilot is still executing a database statement. Close PL/SQL Developer anyway?");
             if (question != null)
             {
-                var r = IsOpen
-                    ? MessageBox.Show(_chat, question, "PL/Pilot", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
-                    : MessageBox.Show(question, "PL/Pilot", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (r != DialogResult.Yes) return false;
+                var answer = QuestionDialog.Ask(DialogOwner(), QuestionDialog.Dark(_ide), "PL/Pilot", question, System.Drawing.SystemIcons.Question, "stay",
+                    new QuestionDialog.Choice("close", L.T("Close anyway")),
+                    new QuestionDialog.Choice("stay", L.T("Do not close")));
+                if (answer != "close") return false;
             }
             return EndTransactionBeforeClose();
+        }
+
+        /// <summary>The chat window if it is visible, otherwise PL/SQL Developer's main window.</summary>
+        private IWin32Window DialogOwner()
+        {
+            if (IsOpen && _chat.Visible) return _chat;
+            try
+            {
+                var handle = _ide.MainWindowHandle;
+                return handle == IntPtr.Zero ? null : new HandleOwner(handle);
+            }
+            catch { return null; }
+        }
+
+        private sealed class HandleOwner : IWin32Window
+        {
+            public HandleOwner(IntPtr handle) { Handle = handle; }
+            public IntPtr Handle { get; }
         }
 
         /// <summary>
@@ -149,22 +167,24 @@ namespace PlsqlDevAgent
             var txn = _ide.PendingTransaction;
             if (txn == null || !_ide.UsesOwnSession) return true;
             var statements = ChangeJournal.StatementsInTransaction(txn);
-            var text = L.T("The database session of PL/Pilot has uncommitted changes:\n\n{0}\n\nCommit them?\nYes = Commit, No = Rollback, Cancel = do not close PL/SQL Developer",
+            var text = L.T("The database session of PL/Pilot has uncommitted changes:\n\n{0}\n\nCommit them or roll them back before PL/SQL Developer closes?",
                 statements.Count == 0 ? L.T("(open transaction)") : "- " + string.Join("\n- ", statements.Take(15)) + (statements.Count > 15 ? "\n- …" : ""));
-            var answer = IsOpen
-                ? MessageBox.Show(_chat, text, "PL/Pilot", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning)
-                : MessageBox.Show(text, "PL/Pilot", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
-            if (answer == DialogResult.Cancel) return false;
+            var answer = QuestionDialog.Ask(DialogOwner(), QuestionDialog.Dark(_ide), "PL/Pilot", text, System.Drawing.SystemIcons.Warning, "cancel",
+                new QuestionDialog.Choice("commit", L.T("Commit")),
+                new QuestionDialog.Choice("rollback", L.T("Roll back")),
+                new QuestionDialog.Choice("cancel", L.T("Do not close")));
+            if (answer != "commit" && answer != "rollback") return false;
             try
             {
-                var res = _ide.Execute(answer == DialogResult.Yes ? "commit" : "rollback");
+                var res = _ide.Execute(answer);
                 if (!res.Ok) throw new IdeException(res.ErrorMessage);
-                Log.Info($"On closing: {(answer == DialogResult.Yes ? "committed" : "rolled back")} the agent's transaction {txn}");
+                Log.Info($"On closing: {(answer == "commit" ? "committed" : "rolled back")} the agent's transaction {txn}");
                 return true;
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "PL/Pilot", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                QuestionDialog.Ask(DialogOwner(), QuestionDialog.Dark(_ide), "PL/Pilot", ex.Message, System.Drawing.SystemIcons.Error, "ok",
+                    new QuestionDialog.Choice("ok", "OK"));
                 return false;
             }
         }

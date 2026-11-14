@@ -24,6 +24,9 @@ Daten gehen nur an diesen Server. Diese Kurzanleitung richtet sich an Anwender; 
 **Plug-Ins → PL-Pilot → Einstellungen**:
 
 - **Basis-URL** und **Modell** Ihres LLM-Servers eintragen (ggf. von der IT), **Testen** klicken, **Speichern**.
+  Beim Testen (und beim Wechsel des Modells) fragt PL/Pilot den Server nach dem **Kontextfenster** des Modells
+  und trägt es ein; bei Ollama wird es nach der ersten Antwort des Modells noch einmal geprüft. Wer einen eigenen
+  Wert behalten will, schaltet **Kontextfenster ermitteln** aus.
 - **Sprache**: *Automatisch* übernimmt die Sprache von PL/SQL Developer bzw. Windows; *Deutsch* erzwingt Deutsch.
   Die Menüs von PL/SQL Developer wechseln nach einem Neustart.
 
@@ -76,6 +79,15 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
   Debug-Informationen behält jede Einheit dabei. Abschaltbar unter **Einstellungen → Agent → Compiler-Warnungen**.
 - PL/Pilot kennt die **Oracle-Version** und die **NLS-Einstellungen** (z. B. Dezimalkomma) der Verbindung und
   schreibt Code passend dazu.
+- **Messen statt raten:** Bei Fragen wie „Ist diese Abfrage schneller?“ führt PL/Pilot beide Varianten aus,
+  vergleicht Laufzeit und CPU-Zeit und prüft, dass beide dieselben Zeilen liefern. Mit Leserecht auf die V$-Views
+  (z. B. `SELECT_CATALOG_ROLE`, beim DBA beantragen) zeigt er zusätzlich den tatsächlichen Ausführungsplan
+  (geschätzte gegen tatsächliche Zeilen) und die gelesenen Blöcke. INSERT/UPDATE/DELETE misst er nur nach Ihrer
+  Zustimmung und rollt sie danach zurück. `/optimize` nutzt das.
+- **Unit-Tests:** `/test` schreibt Tests für eine Programmeinheit. Ist utPLSQL in der Datenbank installiert,
+  legt PL/Pilot ein Test-Package an, führt es aus (nach Zustimmung), zeigt fehlgeschlagene Tests und die
+  Code-Abdeckung und korrigiert die Tests, bis sie durchlaufen. Ohne utPLSQL öffnet er einen Testblock im
+  Test-Fenster.
 
 ## Sicherheit
 

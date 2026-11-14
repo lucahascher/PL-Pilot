@@ -48,6 +48,8 @@ namespace PlsqlDevAgent.Testing
             else if (mode == "TXN-CLOSE") await CloseWithTransactionAsync(plugin);
             else if (mode == "SEC-ONLY") await SqlRunAsync(plugin, securityOnly: true);
             else if (mode == "ANALYSIS-ONLY") await AnalysisRunAsync(plugin);
+            else if (mode == "LLM-TOOLS") await LlmToolsRunAsync(plugin);
+            else if (mode != null && mode.StartsWith("PROMPT-ONLY:")) await PromptOnlyRunAsync(plugin, mode.Substring("PROMPT-ONLY:".Length).Trim());
             else await RunAsync(plugin);
         }
 
@@ -99,21 +101,21 @@ namespace PlsqlDevAgent.Testing
             Line("Open transaction before closing: " + ide.PendingTransaction);
             bool commit = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_ANSWER") == "commit";
             File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
-            _ = Task.Run(async () =>
+            QuestionDialog.ShownForTest = d =>
             {
-                for (int i = 0; i < 200; i++)
+                // a picture of the dialog proves that its text is readable (MessageBox text vanished in the dark theme)
+                try
                 {
-                    var dialog = FindWindow("#32770", "PL/Pilot");
-                    if (dialog != IntPtr.Zero)
+                    using (var bmp = new System.Drawing.Bitmap(d.Width, d.Height))
                     {
-                        Log.Info("Self test: answering the close dialog with " + (commit ? "Yes (commit)" : "No (rollback)"));
-                        PostMessage(dialog, 0x0111 /* WM_COMMAND */, new IntPtr(commit ? 6 /* IDYES */ : 7 /* IDNO */), IntPtr.Zero);
-                        return;
+                        d.DrawToBitmap(bmp, new System.Drawing.Rectangle(0, 0, d.Width, d.Height));
+                        bmp.Save(Path.Combine(_dir, "close-dialog.png"));
                     }
-                    await Task.Delay(100);
                 }
-                Log.Warn("Self test: the close dialog did not appear");
-            });
+                catch (Exception ex) { Log.Warn("Close dialog picture failed: " + ex.Message); }
+                Log.Info($"Self test: answering the close dialog ({d.Question.Replace("\n", " ")}) with " + (commit ? "commit" : "rollback"));
+                d.BeginInvoke((Action)(() => d.Choose(commit ? "commit" : "rollback")));
+            };
             await CloseIde();
         }
 
@@ -175,6 +177,8 @@ namespace PlsqlDevAgent.Testing
                 Line($"IDE version {c.IdeVersion}, connection: {c.ConnectionLabel}");
                 var ctx = new ToolContext { Ide = plugin.Ide, Config = AgentConfig.Load(), RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
                 await AnalysisChecks(ctx, plugin.Ide);
+                await MeasureChecks(ctx, plugin.Ide);
+                await UnitTestChecks(ctx, plugin.Ide);
                 Line($"\n**Total: {_pass} passed, {_fail} failed**");
             }
             catch (Exception ex) { Line("FATAL: " + ex); }
@@ -318,6 +322,309 @@ namespace PlsqlDevAgent.Testing
                 foreach (var drop in new[] { "drop trigger pda_an_trg", "drop view pda_an_v2", "drop view pda_an_v", "drop procedure pda_an_p", "drop procedure pda_an_flags",
                                              "drop procedure pda_an_warn", "drop package pda_an_pkg", "drop table pda_an_t purge" })
                     await Exec(drop);
+            }
+        }
+
+        /// <summary>
+        /// The configured real model with everyday requests: does it pick resolve_error_stack for a pasted error,
+        /// find_dependencies for an impact question, measure_sql to prove a rewrite, and the Test window without utPLSQL?
+        /// </summary>
+        private static async Task LlmToolsRunAsync(Plugin plugin)
+        {
+            var ide = plugin.Ide;
+            var ctx = new ToolContext { Ide = ide, Config = AgentConfig.Load(), RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+            async Task<string> Exec(string sql, string expect = null) => await Tool(ctx, "execute_sql", new JObject { ["sql"] = sql }, expect);
+            try
+            {
+                Line("# PL/Pilot – real model with the analysis tools");
+                Line($"Model: {ctx.Config.Model} at {ctx.Config.BaseUrl}, UI language {L.Lang}");
+                foreach (var drop in new[] { "drop view pda_llm_order_v", "drop package pda_llm_pkg", "drop table pda_llm_order purge" }) await Exec(drop);
+                await Exec("create table pda_llm_order (id number constraint pda_llm_order_pk primary key, customer_id number not null, amount number(12,2), " +
+                           "created date not null, status varchar2(10))", "Executed successfully");
+                await Exec("insert into pda_llm_order select level, mod(level, 500), mod(level * 7, 1000) + 0.5, date '2026-01-01' + mod(level, 300), " +
+                           "case mod(level, 10) when 0 then 'CANCELLED' else 'OPEN' end from dual connect by level <= 50000", "Executed successfully");
+                await Exec("commit");
+                await Exec("create index pda_llm_order_created on pda_llm_order (created)", "Executed successfully");
+                await Exec("begin dbms_stats.gather_table_stats(user, 'PDA_LLM_ORDER'); end;", "Executed successfully");
+                await Exec("create or replace view pda_llm_order_v as select id, customer_id, amount from pda_llm_order where status = 'OPEN'", "Executed successfully");
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace package pda_llm_pkg is\n  function avg_amount(p_customer_id in number) return number;\n  procedure report(p_customer_id in number);\nend pda_llm_pkg;\n/\n" +
+                                 "create or replace package body pda_llm_pkg is\n  function avg_amount(p_customer_id in number) return number is\n    l_sum number;\n    l_cnt number;\n  begin\n" +
+                                 "    select sum(amount), count(*) into l_sum, l_cnt from pda_llm_order where customer_id = p_customer_id;\n    return round(nvl(l_sum, 0) / l_cnt, 2);\n  end avg_amount;\n\n" +
+                                 "  procedure report(p_customer_id in number) is\n  begin\n    dbms_output.put_line('Average: ' || avg_amount(p_customer_id));\n  end report;\nend pda_llm_pkg;\n/\n",
+                }, "compiled successfully");
+                var error = (await Exec("begin pda_llm_pkg.report(9999); end;", "ORA-01476")).Replace("FAILED: ", "");
+
+                plugin.OnMenuClick(Bootstrap.MiChat);
+                var chat = plugin.ChatWindow;
+                for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+                UseTestModel(chat);
+                // a careful user: allows normal actions, rejects destructive ones and changes of the package under test
+                await chat.ExecuteScriptAsync(CarefulApprover(@"/(PACKAGE|BODY) PDA_LLM_PKG\b/i"));
+
+                async Task<string> Ask(string text, int minutes = 8)
+                {
+                    var before = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"") ?? "";
+                    await chat.ExecuteScriptAsync("document.getElementById('input').value = " + JsonConvert.SerializeObject(text) + "; submit();");
+                    var sw = Stopwatch.StartNew();
+                    bool sawBusy = false;
+                    while (sw.Elapsed < TimeSpan.FromMinutes(minutes))
+                    {
+                        await Task.Delay(500);
+                        if (chat.IsBusy) sawBusy = true;
+                        else if (sawBusy || sw.Elapsed > TimeSpan.FromSeconds(20)) break;
+                    }
+                    if (chat.IsBusy)
+                    {
+                        // a slow local model may still be working: stop it, so the next prompt and closing are not blocked
+                        Line($"(still working after {minutes} minutes: stopped)");
+                        chat.StopForTest();
+                        for (int i = 0; i < 60 && chat.IsBusy; i++) await Task.Delay(500);
+                    }
+                    await Task.Delay(1500);
+                    var after = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"") ?? "";
+                    // from the prompt on (the welcome text disappears with the first message, so the old length is no anchor)
+                    var firstLine = text.Split('\n')[0];
+                    var anchor = after.LastIndexOf(firstLine.Substring(0, Math.Min(40, firstLine.Length)), StringComparison.Ordinal);
+                    var segment = anchor >= 0 ? after.Substring(anchor) : after.Length > before.Length ? after.Substring(before.Length) : after;
+                    Line($"\n### Prompt ({sw.Elapsed.TotalSeconds:0} s): {text.Split('\n')[0]}\n```\n{(segment.Length > 2500 ? segment.Substring(0, 1200) + "\n…\n" + segment.Substring(segment.Length - 1200) : segment).Trim()}\n```");
+                    return segment;
+                }
+
+                var s1 = await Ask("Dieser Fehler kommt aus unserem Anwendungs-Log. Was ist die Ursache und wie behebe ich ihn? Noch nichts ändern.\n\n" + error);
+                Check("pasted error stack: the model calls resolve_error_stack", s1.Contains("resolve_error_stack"));
+                var s2 = await Ask("Wir wollen die Spalte AMOUNT der Tabelle PDA_LLM_ORDER in NET_AMOUNT umbenennen. Welche Objekte wären betroffen? Nichts ändern.");
+                Check("impact question: the model calls find_dependencies", s2.Contains("find_dependencies"));
+                var s3 = await Ask("Ist diese Umformulierung schneller und liefert sie dasselbe Ergebnis? Bitte messen, nichts ändern.\n" +
+                                   "Original: select id, amount from pda_llm_order where trunc(created) = date '2026-03-01'\n" +
+                                   "Neu: select id, amount from pda_llm_order where created >= date '2026-03-01' and created < date '2026-03-02'");
+                Check("rewrite to prove: the model calls measure_sql", s3.Contains("measure_sql"));
+                var utPlsql = await Task.Run(() => UtPlsql.Detect(ide));
+                var s4 = await Ask("/test pda_llm_pkg.avg_amount", 20); // writes, compiles and runs a test package: many slow steps
+                var rejected = await chat.ExecuteScriptAsync("window.pdaRejected || 0");
+                var state = await Task.Run(() => ide.Query(
+                    "select (select count(*) from pda_llm_order) || '/' || (select count(*) from user_source where name = 'PDA_LLM_PKG' and type = 'PACKAGE BODY' " +
+                    "and text like '%nvl(l_sum, 0) / l_cnt%') from dual", 1));
+                Line($"Approvals rejected like a careful user would: {rejected}");
+                Check($"/test leaves the table data and the tested package unchanged (rows / original line: {state.Rows[0][0]})", state.Rows[0][0] == "50000/1");
+                if (utPlsql != null)
+                {
+                    Check("/test with utPLSQL: the model compiles a test package and runs it with run_unit_tests", s4.Contains("compile_plsql") && s4.Contains("run_unit_tests"));
+                    await Exec("begin for r in (select object_name from user_objects where object_type = 'PACKAGE' and object_name like 'UT\\_%' escape '\\' " +
+                               "and object_name like '%PDA_LLM%') loop execute immediate 'drop package ' || r.object_name; end loop; end;");
+                }
+                else Check("/test without utPLSQL: the model opens a Test window", s4.Contains("open_new_window") || s4.Contains("Test window") || s4.Contains("Test-Fenster"));
+                var transcript = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"");
+                File.WriteAllText(Path.Combine(_dir, "transcript-tools.txt"), transcript ?? "", Encoding.UTF8);
+                Line($"\n**Total: {_pass} passed, {_fail} failed**");
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                // whatever the model left uncommitted would stop PL/SQL Developer from closing (Commit/Rollback question)
+                try { if (ide.PendingTransaction != null) await Task.Run(() => ide.Execute("rollback")); } catch { }
+                foreach (var drop in new[] { "drop view pda_llm_order_v", "drop package pda_llm_pkg", "drop table pda_llm_order purge" }) await Exec(drop);
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
+        }
+
+        /// <summary>
+        /// Approves like a careful user: normal actions yes, cards with a destructive warning (and compiles of objects
+        /// matching <paramref name="protectedTitle"/>, a JS regex) no, with German feedback; counts window.pdaRejected.
+        /// </summary>
+        private static string CarefulApprover(string protectedTitle = null) => @"setInterval(() => {
+            const c = document.querySelector('.approval:not(.done)'); if (!c) return;
+            const title = (c.querySelector('.ahead') || c).innerText;
+            let reason = null;
+            if (c.querySelector('.warn')) reason = 'Nein - keine bestehenden Daten löschen oder ändern.';
+            else if (" + (protectedTitle ?? "null") + @" && " + (protectedTitle ?? "/$^/") + @".test(title)) reason = 'Nein - den getesteten Code nicht ändern, nur den Fehler melden.';
+            if (reason) { c.querySelector('input').value = reason; window.pdaRejected = (window.pdaRejected || 0) + 1; c.querySelector('button[data-a=""no""]').click(); }
+            else c.querySelector('button.primary').click();
+          }, 700);";
+
+        /// <summary>
+        /// PLSQLDEVAGENT_AUTOTEST_PROMPT = "PROMPT-ONLY:&lt;text&gt;": sends one prompt to the real model like a user would
+        /// (careful approver) and records the transcript, the tool calls and the objects it left behind.
+        /// </summary>
+        private static async Task PromptOnlyRunAsync(Plugin plugin, string prompt)
+        {
+            var ide = plugin.Ide;
+            try
+            {
+                Line("# PL/Pilot – one prompt with the real model");
+                plugin.OnMenuClick(Bootstrap.MiChat);
+                var chat = plugin.ChatWindow;
+                for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+                UseTestModel(chat);
+                Line("Prompt: " + prompt);
+                var before = await Task.Run(() => ide.Query("select max(object_id) from user_objects", 1).Rows[0][0]);
+                await chat.ExecuteScriptAsync(CarefulApprover());
+                await chat.ExecuteScriptAsync("document.getElementById('input').value = " + JsonConvert.SerializeObject(prompt) + "; submit();");
+                var sw = Stopwatch.StartNew();
+                bool sawBusy = false;
+                while (sw.Elapsed < TimeSpan.FromMinutes(20))
+                {
+                    await Task.Delay(1000);
+                    if (chat.IsBusy) sawBusy = true;
+                    else if (sawBusy || sw.Elapsed > TimeSpan.FromSeconds(30)) break;
+                }
+                if (chat.IsBusy) { Line("(still working after 20 minutes: stopped)"); chat.StopForTest(); for (int i = 0; i < 60 && chat.IsBusy; i++) await Task.Delay(500); }
+                Line($"Finished after {sw.Elapsed.TotalSeconds:0} s; approvals rejected: {await chat.ExecuteScriptAsync("window.pdaRejected || 0")}");
+
+                var transcript = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"") ?? "";
+                File.WriteAllText(Path.Combine(_dir, "transcript-prompt.txt"), transcript, Encoding.UTF8);
+                var created = await Task.Run(() => ide.Query(
+                    $"select object_type, object_name, status from user_objects where object_id > {before} and object_name not like 'ISEQ$$%' order by object_id", 100));
+                Line("Objects created:\n```\n" + string.Join("\n", created.Rows.Select(r => $"{r[0]} {r[1]} {r[2]}")) + "\n```");
+                Line("Transcript (end):\n```\n" + (transcript.Length > 6000 ? "…\n" + transcript.Substring(transcript.Length - 6000) : transcript) + "\n```");
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                try { if (ide.PendingTransaction != null) await Task.Run(() => ide.Execute("rollback")); } catch { }
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
+        }
+
+        /// <summary>
+        /// measure_sql: queries fetched in the database, binds, comparison with the same-rows check, DML rolled back
+        /// (also inside an open transaction), plan mode, and the actual plan or the note about missing V$ access.
+        /// </summary>
+        private static async Task MeasureChecks(ToolContext ctx, IIde ide)
+        {
+            Line("\n## 13. Measuring statements");
+            async Task<string> Exec(string sql, string expect = null) => await Tool(ctx, "execute_sql", new JObject { ["sql"] = sql }, expect);
+            async Task<string> Measure(JObject args, string expect) => await Tool(ctx, "measure_sql", args, expect);
+            await Exec("drop table pda_ms_t purge");
+            // several statements in one execute_sql call are refused before anyone is asked to approve them
+            int asked = 0;
+            var counting = new ToolContext { Ide = ctx.Ide, Config = ctx.Config, RequestApproval = r => { asked++; return Task.FromResult(ApprovalResult.Yes()); } };
+            await Tool(counting, "execute_sql", new JObject { ["sql"] = "create table pda_two_a (a number); create table pda_two_b (b number)" }, "exactly ONE statement");
+            Check("several statements: refused without an approval card", asked == 0);
+            try
+            {
+                await Exec("create table pda_ms_t as select level id, mod(level, 7) grp, rpad('x', 50, 'x') pad from dual connect by level <= 20000", "Executed successfully");
+                await Exec("begin dbms_stats.gather_table_stats(user, 'PDA_MS_T'); end;", "Executed successfully");
+
+                var single = await Measure(new JObject { ["sql"] = "select id from pda_ms_t where grp = :g", ["binds"] = new JObject { ["g"] = 3 } }, "2,857 rows fetched");
+                Check("measure_sql: actual plan, or a note that V$ access is missing",
+                    single.Contains("A-Rows") || single.Contains("No actual execution plan"));
+                await Measure(new JObject
+                {
+                    ["sql"] = "with x as (select /*+ full(t) */ id from pda_ms_t t where grp = 2) select count(*) from x",
+                    ["runs"] = 2,
+                }, "statistics of the last run");
+                await Measure(new JObject
+                {
+                    ["sql"] = "select id from pda_ms_t where grp = :g",
+                    ["compare_sql"] = "select id from pda_ms_t where grp + 0 = :g",
+                    ["binds"] = new JObject { ["g"] = 3 },
+                }, "Same rows: YES");
+                await Measure(new JObject
+                {
+                    ["sql"] = "select id from pda_ms_t where grp = :g",
+                    ["compare_sql"] = "select id from pda_ms_t where grp = :g and id > 100",
+                    ["binds"] = new JObject { ["g"] = 3 },
+                }, "Same rows: NO");
+                await Measure(new JObject { ["sql"] = "select * from pda_no_such_table" }, "ORA-00942");
+
+                // DML is executed and rolled back; with an open transaction only back to a savepoint
+                await Measure(new JObject { ["sql"] = "update pda_ms_t set pad = 'changed' where grp = 1" }, "rows processed (rolled back)");
+                await Tool(ctx, "run_query", new JObject { ["sql"] = "select count(*) changed from pda_ms_t where pad = 'changed'" }, "0");
+                Check("measure_sql: no transaction left open after the rolled back UPDATE", ide.PendingTransaction == null);
+                await Exec("insert into pda_ms_t values (-1, 9, 'keep')", "Executed successfully");
+                await Measure(new JObject { ["sql"] = "delete from pda_ms_t where grp = 2" }, "rows processed (rolled back)");
+                var rows = await Task.Run(() => ide.Query("select (select count(*) from pda_ms_t where id = -1) || '/' || (select count(*) from pda_ms_t where grp = 2) from dual", 1));
+                Check($"measure_sql in an open transaction: the earlier INSERT stays, the DELETE is undone ({rows.Rows[0][0]})",
+                    rows.Rows[0][0] == "1/2857" && ide.PendingTransaction != null);
+                await Exec("rollback", "Executed successfully");
+
+                var plan = new ToolContext { Ide = ctx.Ide, Config = ctx.Config, RequestApproval = ctx.RequestApproval, PlanMode = true };
+                await Tool(plan, "measure_sql", new JObject { ["sql"] = "update pda_ms_t set pad = 'x'" }, "Not executed: the agent is in PLAN MODE");
+                await Tool(plan, "measure_sql", new JObject { ["sql"] = "select count(*) from pda_ms_t" }, "1 row fetched");
+            }
+            finally
+            {
+                await Exec("drop table pda_ms_t purge");
+            }
+        }
+
+        /// <summary>run_unit_tests with utPLSQL (a failing and a passing run, coverage) or the message without utPLSQL.</summary>
+        private static async Task UnitTestChecks(ToolContext ctx, IIde ide)
+        {
+            Line("\n## 14. Unit tests (utPLSQL)");
+            var ut = await Task.Run(() => UtPlsql.Detect(ide));
+            var info = await Task.Run(() => DatabaseInfo.Load(ide));
+            if (ut == null)
+            {
+                Line("utPLSQL is not installed in this database: only the fallback is checked.");
+                await Tool(ctx, "run_unit_tests", new JObject(), "utPLSQL is not installed");
+                Check("system prompt says utPLSQL is missing and suggests a Test window", info?.PromptSection().Contains("utPLSQL is not installed") == true);
+                return;
+            }
+            Line($"utPLSQL {ut.Version} in schema {ut.Owner}");
+            Check("system prompt names the installed utPLSQL version", info?.PromptSection().Contains("utPLSQL " + ut.Version) == true);
+            async Task<string> Exec(string sql, string expect = null) => await Tool(ctx, "execute_sql", new JObject { ["sql"] = sql }, expect);
+            string TestPackage(string expected) =>
+                "create or replace package ut_pda_calc is\n  --%suite(PDA calculations)\n\n  --%test(adds 19 percent VAT)\n  procedure add_vat;\n\n" +
+                "  --%test(raises -20001 when dividing by zero)\n  --%throws(-20001)\n  procedure div_zero;\n\n  --%test(VAT of 10)\n  procedure vat_of_ten;\nend ut_pda_calc;\n/\n" +
+                "create or replace package body ut_pda_calc is\n  procedure add_vat is\n  begin\n    ut.expect(pda_ut_calc.add_vat(100)).to_equal(119);\n  end add_vat;\n\n" +
+                "  procedure div_zero is\n    l number;\n  begin\n    l := pda_ut_calc.safe_div(1, 0);\n  end div_zero;\n\n" +
+                $"  procedure vat_of_ten is\n  begin\n    ut.expect(pda_ut_calc.add_vat(10)).to_equal({expected});\n  end vat_of_ten;\nend ut_pda_calc;\n/\n";
+            try
+            {
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace package pda_ut_calc is\n  function add_vat(p_net in number) return number;\n  function safe_div(p_a in number, p_b in number) return number;\nend pda_ut_calc;\n/\n" +
+                                 "create or replace package body pda_ut_calc is\n  function add_vat(p_net in number) return number is\n  begin\n    return round(p_net * 1.19, 2);\n  end add_vat;\n\n" +
+                                 "  function safe_div(p_a in number, p_b in number) return number is\n  begin\n    if p_b = 0 then\n      raise_application_error(-20001, 'division by zero');\n    end if;\n" +
+                                 "    return p_a / p_b;\n  end safe_div;\nend pda_ut_calc;\n/\n",
+                }, "compiled successfully");
+                await Tool(ctx, "compile_plsql", new JObject { ["source"] = TestPackage("12") }, "compiled successfully");
+                var failing = await Tool(ctx, "run_unit_tests", new JObject { ["path"] = "ut_pda_calc" }, "3 tests, 1 failed");
+                Check("the failed expectation is reported with actual and expected value", failing.Contains("NOT PASSED") && (failing.Contains("11.9") || failing.Contains("11,9"))); // utPLSQL uses the NLS decimal separator
+                await Tool(ctx, "compile_plsql", new JObject { ["source"] = TestPackage("11.9") }, "compiled successfully");
+                var passing = await Tool(ctx, "run_unit_tests", new JObject { ["path"] = "ut_pda_calc", ["coverage_objects"] = new JArray("pda_ut_calc") }, "ALL PASSED");
+                Check("code coverage of the tested package is reported", passing.Contains("PDA_UT_CALC") && passing.Contains("% of"));
+
+                // utPLSQL's "suite package does not exist" (ORA-20204) is explained
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace package ut_pda_diag is\n  --%suite(No empty line)\n  --%test(one)\n  procedure t1;\nend ut_pda_diag;\n/\n" +
+                                 "create or replace package body ut_pda_diag is\n  procedure t1 is\n  begin\n    ut.expect(1).to_equal(1);\n  end t1;\nend ut_pda_diag;\n/\n",
+                }, "compiled successfully");
+                await Tool(ctx, "run_unit_tests", new JObject { ["path"] = "ut_pda_diag" }, "put an EMPTY LINE after the --%suite line");
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace package ut_pda_diag is\n  --%suite(Invalid specification)\n\n  --%test(one)\n  procedure t1(p in pda_no_such_type);\nend ut_pda_diag;\n/\n",
+                }, "COMPILED WITH ERRORS");
+                // utPLSQL reports the tests of an invalid package as errored: the compile errors are named
+                await Tool(ctx, "run_unit_tests", new JObject { ["path"] = "ut_pda_diag" }, "PDA_NO_SUCH_TYPE");
+                await Tool(ctx, "run_unit_tests", new JObject { ["path"] = "ut_pda_does_not_exist" }, "There is no package");
+                // the code under test is invalid: the tests error, and the reason is named
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace package body pda_ut_calc is\n  function add_vat(p_net in number) return number is\n  begin\n    return round(p_net * l_rate, 2);\n  end add_vat;\n\n" +
+                                 "  function safe_div(p_a in number, p_b in number) return number is\n  begin\n    return p_a / p_b;\n  end safe_div;\nend pda_ut_calc;\n/\n",
+                }, "COMPILED WITH ERRORS");
+                await Tool(ctx, "run_unit_tests", new JObject { ["path"] = "ut_pda_calc" }, "PACKAGE BODY " + ctx.CurrentSchema + ".PDA_UT_CALC used by the tests is INVALID");
+
+                // get_compile_errors for a PACKAGE also shows the errors of its body
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace package ut_pda_diag is\n  --%suite(Body with errors)\n\n  --%test(one)\n  procedure t1;\nend ut_pda_diag;\n/\n" +
+                                 "create or replace package body ut_pda_diag is\n  procedure t1 is\n  begin\n    ut.expect(pda_no_such_function(1)).to_equal(1);\n  end t1;\nend ut_pda_diag;\n/\n",
+                }, "COMPILED WITH ERRORS");
+                await Tool(ctx, "get_compile_errors", new JObject { ["name"] = "ut_pda_diag", ["object_type"] = "PACKAGE" }, "PDA_NO_SUCH_FUNCTION");
+            }
+            finally
+            {
+                await Exec("drop package ut_pda_calc");
+                await Exec("drop package pda_ut_calc");
+                await Exec("drop package ut_pda_diag");
             }
         }
 
@@ -815,6 +1122,8 @@ namespace PlsqlDevAgent.Testing
                 await TransactionChecks(ide, cfg);
                 await SecurityChecks(ide, cfg);
                 await AnalysisChecks(ctx, ide);
+                await MeasureChecks(ctx, ide);
+                await UnitTestChecks(ctx, ide);
                 Line($"\n**Tool tests: {_pass} passed, {_fail} failed**");
 
                 var prompt = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PROMPT");
@@ -929,6 +1238,7 @@ namespace PlsqlDevAgent.Testing
             plugin.OnMenuClick(Bootstrap.MiChat);
             var chat = plugin.ChatWindow;
             for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+            UseTestModel(chat);
             await chat.ExecuteScriptAsync("setInterval(() => { const b = document.querySelector('.approval:not(.done) button.primary'); if (b) b.click(); }, 700);");
 
             var rulesFile = Path.Combine(_dir, "company-rules.md");
@@ -969,6 +1279,7 @@ namespace PlsqlDevAgent.Testing
             plugin.OnMenuClick(Bootstrap.MiChat);
             var chat = plugin.ChatWindow;
             for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+            UseTestModel(chat);
             await SendAndWait(chat, "/explain");
             await SendAndWait(chat, "Wie viele Zeilen hat die Tabelle EMP? Antworte in einem kurzen Satz.");
             var transcript = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"");
@@ -1035,6 +1346,7 @@ namespace PlsqlDevAgent.Testing
             plugin.OnMenuClick(Bootstrap.MiChat);
             var chat = plugin.ChatWindow;
             for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+            UseTestModel(chat);
             await chat.ExecuteScriptAsync("setInterval(() => { const b = document.querySelector('.approval:not(.done) button.primary'); if (b) b.click(); }, 700);");
             await chat.ExecuteScriptAsync("document.getElementById('input').value = " + JsonConvert.SerializeObject(prompt) + "; submit();");
             var sw = Stopwatch.StartNew();
@@ -1082,6 +1394,18 @@ namespace PlsqlDevAgent.Testing
             Line($"Newest saved chat: {saved?.Title} ({saved?.Messages} messages, {saved?.Updated:HH:mm:ss})");
             Check("chat was saved", saved != null && saved.Title.StartsWith(prompt.Substring(0, 20)));
             await ScreenshotAsync(chat, Path.Combine(_dir, "chat2.png"));
+        }
+
+        /// <summary>
+        /// PLSQLDEVAGENT_AUTOTEST_MODEL: the real-model tests use this model instead of the configured one
+        /// (for this session only, the settings are not changed), e.g. a smaller, faster model.
+        /// </summary>
+        private static void UseTestModel(ChatForm chat)
+        {
+            var model = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_MODEL");
+            if (string.IsNullOrWhiteSpace(model)) return;
+            chat.ApplyConfigForTest(c => c.Model = model.Trim());
+            Line($"Model for this test: {model.Trim()} (PLSQLDEVAGENT_AUTOTEST_MODEL; settings unchanged)");
         }
 
         private static async Task SendAndWait(ChatForm chat, string text)

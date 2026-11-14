@@ -359,7 +359,8 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
     <datalist id="models"></datalist>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Temperature</div><input id="Temperature" type="number" step="0.1" min="0" max="2"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Max Tokens</div><div class="s-desc">Maximum length of one answer.</div><input id="MaxTokens" type="number" min="0"></div>
-    <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Context Window</div><div class="s-desc">Context size of the model in tokens (token meter and automatic compaction).</div><input id="ContextWindowTokens" type="number" min="4096"></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Context Window</div><div class="s-desc">Context size of the model in tokens (token meter and automatic compaction).</div><input id="ContextWindowTokens" type="number" min="4096"><div id="ctxDetect" class="s-desc"></div></div>
+    <div class="setting check"><div class="s-title"><span class="s-cat">Server: </span>Detect Context Window</div><label><input type="checkbox" id="DetectContextWindow"><span class="s-desc">Ask the server for the context size of the model (on Test, when the model changes and after its first answer) and set Context Window to it.</span></label></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Compact At</div><div class="s-desc">Summarize older messages when the conversation uses this percentage of the context window (0 = never).</div><input id="CompactAtPercent" type="number" min="0" max="95"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Timeout</div><div class="s-desc">Request timeout in seconds.</div><input id="RequestTimeoutSeconds" type="number" min="30"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Extra Request JSON</div><div class="s-desc">Merged into every request, e.g. {"top_p": 0.95}.</div><textarea id="ExtraBodyJson" rows="2"></textarea></div>
@@ -520,7 +521,14 @@ const DE = {
   'API Key': 'API-Schlüssel', 'Optional. Stored encrypted for your Windows user.': 'Optional. Wird verschlüsselt für Ihren Windows-Benutzer gespeichert.',
   'Model': 'Modell', 'Use Test to check the connection and list the available models.': 'Mit „Testen“ die Verbindung prüfen und die verfügbaren Modelle auflisten.', 'Test': 'Testen',
   'Temperature': 'Temperatur', 'Max Tokens': 'Max. Tokens', 'Maximum length of one answer.': 'Maximale Länge einer Antwort.',
-  'Context Window': 'Kontextfenster', 'Context size of the model in tokens (token meter and automatic compaction).': 'Kontextgröße des Modells in Tokens (Token-Anzeige und automatisches Zusammenfassen).',
+  'Context Window': 'Kontextfenster', 'Detect Context Window': 'Kontextfenster ermitteln',
+  'Ask the server for the context size of the model (on Test, when the model changes and after its first answer) and set Context Window to it.':
+    'Den Server nach der Kontextgröße des Modells fragen (beim Testen, beim Modellwechsel und nach seiner ersten Antwort) und das Kontextfenster darauf setzen.',
+  'Server context window: {0} tokens ({1}).': 'Kontextfenster laut Server: {0} Tokens ({1}).',
+  'The model supports up to {0} tokens ({1}).': 'Das Modell unterstützt bis zu {0} Tokens ({1}).',
+  'Context Window set to {0}: click Save to keep it.': 'Kontextfenster auf {0} gesetzt: zum Übernehmen Speichern klicken.',
+  'The server does not report the context size of this model.': 'Der Server meldet die Kontextgröße dieses Modells nicht.',
+  'Context size of the model in tokens (token meter and automatic compaction).': 'Kontextgröße des Modells in Tokens (Token-Anzeige und automatisches Zusammenfassen).',
   'Compact At': 'Zusammenfassen ab', 'Summarize older messages when the conversation uses this percentage of the context window (0 = never).':
     'Ältere Nachrichten zusammenfassen, wenn die Unterhaltung diesen Anteil des Kontextfensters belegt (0 = nie).',
   'Timeout': 'Zeitlimit', 'Request timeout in seconds.': 'Zeitlimit einer Anfrage in Sekunden.',
@@ -625,7 +633,7 @@ function t(en, ...args) {
 const tr = t; // alias for places where 't' is used as a variable name
 /** Translates the static texts, placeholders and tooltips outside the chat messages. */
 function applyI18n() {
-  const skip = '#messages, #chatList, #popup, #tasks, #txn, #ctx, #modelLabel, #meter, #hint, #guard, #btnMode, #promptState, #rulesInfo, #testResult, #edInfo, #edTitle, script, style';
+  const skip = '#messages, #chatList, #popup, #tasks, #txn, #ctx, #modelLabel, #meter, #hint, #guard, #btnMode, #promptState, #rulesInfo, #testResult, #ctxDetect, #edInfo, #edTitle, script, style';
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT,
     { acceptNode: n => n.parentElement && !n.parentElement.closest(skip) && n.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
   const nodes = [];
@@ -1412,7 +1420,7 @@ function replay(events) {
 }
 
 // ---------------------------------------------------------------- settings editor
-const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'CompactAtPercent', 'RequestTimeoutSeconds', 'ExtraBodyJson',
+const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'DetectContextWindow', 'CompactAtPercent', 'RequestTimeoutSeconds', 'ExtraBodyJson',
   'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
   'MaxQueryRows', 'CompilerWarnings', 'ProtectedConnections', 'BackupBeforeChanges',
   'SaveChatHistory', 'ChatHistoryContent', 'ChatRetentionDays', 'BackupRetentionDays', 'LogRetentionDays',
@@ -1422,6 +1430,7 @@ function openSettings(cfg) {
   settingsBase = cfg || {};
   FIELDS.forEach(f => { const e = $(f); if (!e) return; if (e.type === 'checkbox') e.checked = !!cfg[f]; else e.value = cfg[f] ?? ''; });
   $('testResult').textContent = '';
+  $('ctxDetect').textContent = '';
   if (!$('rulesInfo').textContent) $('rulesInfo').textContent = t('Checking rule files…');
   updatePromptState();
   $('settings').classList.add('open');
@@ -1489,6 +1498,17 @@ function readSettings() {
 $('btnCancelSettings').onclick = closeSettings;
 $('btnCloseSettings').onclick = closeSettings;
 $('btnSaveSettings').onclick = () => send({ type: 'save_settings', config: readSettings() });
+// the context window belongs to the model: ask the server when another one is chosen
+$('Model').addEventListener('change', () => { if ($('Model').value.trim()) send({ type: 'detect_context', config: readSettings() }); });
+function showContext(c) {
+  const box = $('ctxDetect');
+  if (!c) { box.textContent = t('The server does not report the context size of this model.'); return; }
+  const num = n => Number(n).toLocaleString(lang === 'de' ? 'de-DE' : 'en-US');
+  let s = c.tokens ? t('Server context window: {0} tokens ({1}).', num(c.tokens), c.source) : t('The model supports up to {0} tokens ({1}).', num(c.maximum), c.source);
+  if (c.note) s += ' ' + c.note;
+  if (c.setting && $('DetectContextWindow').checked) { $('ContextWindowTokens').value = c.setting; s += ' ' + t('Context Window set to {0}: click Save to keep it.', num(c.setting)); }
+  box.textContent = s;
+}
 $('btnTest').onclick = () => { $('testResult').textContent = t('Testing…'); $('testResult').style.color = ''; send({ type: 'test_connection', config: readSettings() }); };
 $('btnBrowse').onclick = () => send({ type: 'browse_folder', current: $('WorkspaceDir').value });
 $('lnkLog').onclick = e => { e.preventDefault(); send({ type: 'open_log' }); };
@@ -1595,9 +1615,11 @@ function onHost(m) {
         r.style.color = 'var(--success)';
         $('models').innerHTML = m.models.map(x => '<option value="' + esc(x) + '">').join('');
         if (!$('Model').value && m.models.length) $('Model').value = m.models[0];
+        showContext(m.context);
       } else { r.textContent = '✖ ' + m.error; r.style.color = 'var(--error)'; }
       break;
     }
+    case 'context_info': if (m.model === $('Model').value.trim()) showContext(m.context); break;
     case 'folder': if (m.path) $('WorkspaceDir').value = m.path; break;
     case 'cleared': showEmpty(); break;
     case 'chats': showChats(m); break;

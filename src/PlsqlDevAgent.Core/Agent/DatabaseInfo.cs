@@ -18,6 +18,8 @@ namespace PlsqlDevAgent.Agent
         /// <summary>NLS session parameters, e.g. NLS_NUMERIC_CHARACTERS -> ",.".</summary>
         public Dictionary<string, string> Nls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public string CharacterSet, NCharacterSet, Edition;
+        /// <summary>utPLSQL v3 the user can run (null = not installed or not accessible).</summary>
+        public string UtPlsqlVersion, UtPlsqlOwner;
 
         private static readonly string[] NlsParameters =
         {
@@ -71,6 +73,13 @@ namespace PlsqlDevAgent.Agent
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { Util.Log.Warn("NLS settings could not be read: " + ex.Message); }
+
+            if (any)
+            {
+                var ut = Tools.UtPlsql.Detect(ide);
+                info.UtPlsqlVersion = ut?.Version;
+                info.UtPlsqlOwner = ut?.Owner;
+            }
             return any ? info : null;
         }
 
@@ -114,6 +123,18 @@ namespace PlsqlDevAgent.Agent
             }
             if (!string.IsNullOrEmpty(Edition) && !string.Equals(Edition, "ORA$BASE", StringComparison.OrdinalIgnoreCase))
                 sb.Append($"- Edition-based redefinition: your session uses edition {Edition}; editionable objects you compile are created in this edition.\n");
+            if (UtPlsqlVersion != null)
+                sb.Append($"- Unit tests: utPLSQL {UtPlsqlVersion} is installed (schema {UtPlsqlOwner}). Write tests as utPLSQL v3 test packages " +
+                          "(specification: --%suite(description), then an EMPTY LINE, then --%test(description) directly before each test procedure – " +
+                          "without the empty line utPLSQL does not find the suite (ORA-20204); optional --%beforeall / " +
+                          "--%beforeeach / --%throws(-20001); body: ut.expect(actual).to_equal(expected), to_be_null(), to_be_true() …), " +
+                          "compile them with compile_plsql and run them with run_unit_tests (not ut.run in execute_sql: run_unit_tests explains " +
+                          "why a suite is not found). Test data is inserted by the test package itself " +
+                          "(--%beforeall / --%beforeeach); utPLSQL rolls it back. Never delete, change or commit existing data for a test.\n");
+            else
+                sb.Append("- Unit tests: utPLSQL is not installed in this database. Write tests as anonymous PL/SQL blocks that check the " +
+                          "results and raise an error on a mismatch, and open them in a Test window (open_new_window with window_type test) " +
+                          "for the user to run.\n");
             return sb.ToString();
         }
 

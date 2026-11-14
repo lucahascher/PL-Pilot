@@ -52,6 +52,9 @@ It was written for locked-down company PCs: it installs **without administrator 
 - **Impact analysis and error stacks.** Shows what uses an object, down to the source lines that use a single
   column; names the objects a change invalidated and recompiles them. Paste an error stack (`ORA-06512` lines in
   any language, or a call stack) and it shows the source line of every frame.
+- **Measures instead of guessing.** Runs a statement and shows the actual plan (estimated vs actual rows per
+  step) with its real costs, and proves a rewrite: same rows, numbers before and after. Writes utPLSQL tests,
+  runs them and reports failures and code coverage (without utPLSQL: a test block in a Test window).
 - **You stay in control.** Every change needs your approval; you can revert single edits or *rewind* the
   whole task back to any message or step. Uncommitted DML is shown with Commit / Rollback buttons.
 - **Safe around production.** Connections that look like production are read-only for the agent,
@@ -94,6 +97,13 @@ It was written for locked-down company PCs: it installs **without administrator 
 
 Open **PL-Pilot → Settings**, enter the base URL, click **Test**, pick a model and **Save**.
 
+**Context window:** *Test* (and choosing another model) also asks the server how large the model's context window
+is and fills in *Context Window*, which drives the token meter and when the conversation is compacted. vLLM,
+OpenRouter, llama.cpp and LM Studio report it in their model data; Ollama decides it only when it loads the model,
+so PL/Pilot checks again after the model's first answer and corrects the setting (with a notice in the chat).
+A setting larger than the server's real window would let the server silently cut off the start of the
+conversation, system prompt included. Switch off *Detect Context Window* to keep a value of your own.
+
 | Server | Base URL | Notes |
 |---|---|---|
 | Ollama | `http://localhost:11434/v1` | use a model with tool support |
@@ -130,9 +140,12 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 |---|---|
 | Planning | `update_tasks`, `run_subtask` |
 | IDE | `get_ide_context`, `get_editor_text`, `get_selected_text`, `edit_editor`, `set_editor_text`, `open_new_window`, `open_object`, `get_result_grid` |
-| Database (read) | `run_query`, `list_objects`, `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `find_dependencies`, `resolve_error_stack`, `list_backups` |
-| Database (change, with approval) | `compile_plsql`, `execute_sql`, `recompile_invalid`, `restore_backup` |
+| Database (read) | `run_query`, `list_objects`, `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `measure_sql`¹, `find_dependencies`, `resolve_error_stack`, `list_backups` |
+| Database (change, with approval) | `compile_plsql`, `execute_sql`, `recompile_invalid`, `run_unit_tests`, `restore_backup` |
 | Project folder (optional) | `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `open_file_in_ide` |
+
+¹ Queries only read. INSERT / UPDATE / DELETE / MERGE are measured only with your approval and rolled back
+afterwards; not in plan mode or on protected connections.
 
 ## Safety model
 
@@ -227,7 +240,7 @@ syntax-check the chat page.
   (exactly as shown in the chat header), then start PL/SQL Developer logged on, e.g.
   `plsqldev.exe userid=scott/tiger@localhost:1521/FREEPDB1`. It writes `report.md` and closes the IDE; it
   refuses to run on any other or on a protected connection. Quick modes via
-  `PLSQLDEVAGENT_AUTOTEST_PROMPT`: `SQL-ONLY`, `REWIND-ONLY`, `TXN-ONLY`, `TXN-CLOSE`, `SEC-ONLY`, `ANALYSIS-ONLY`,
+  `PLSQLDEVAGENT_AUTOTEST_PROMPT`: `SQL-ONLY`, `REWIND-ONLY`, `TXN-ONLY`, `TXN-CLOSE`, `SEC-ONLY`, `ANALYSIS-ONLY`, `LLM-TOOLS` (the configured model with the analysis tools),
   `ENC-ONLY`, `HTTPS-ONLY`.
 - A local test database: `docker run -d -p 1521:1521 -e ORACLE_PASSWORD=<pwd> -e APP_USER=scott -e APP_USER_PASSWORD=tiger gvenzl/oracle-free:23-slim-faststart`
   (PL/SQL Developer needs an Oracle client; the Instant Client is enough).
@@ -264,6 +277,9 @@ code page (1252 includes ä ö ü ß € „“ – …) everywhere. Common symb
 - With *Separate session* off (or in PL/SQL Developer's single-session mode) the agent shares your session
   and its SQL runs on the IDE main thread.
 - Rewind information is lost when PL/SQL Developer is closed.
+- `measure_sql` shows the actual execution plan and session statistics only if the user may read the V$ views
+  (`SELECT_CATALOG_ROLE`, or SELECT on V$SQL, V$SQL_PLAN_STATISTICS_ALL, V$MYSTAT, V$STATNAME); otherwise it
+  reports rows, elapsed and CPU time.
 
 ## AI usage during development
 
