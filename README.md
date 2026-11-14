@@ -17,7 +17,7 @@ fixes compile errors — and asks you before every change.
 
 </div>
 
-PL/Pilot is a plug-in for [Allround Automations PL/SQL Developer](https://www.allroundautomations.com/products/pl-sql-developer/)
+As a PL/SQL Developer by day I was bothered by the lack of a good agentic coding tool for the PL/SQL Developer. PL/Pilot is a plug-in for [Allround Automations PL/SQL Developer](https://www.allroundautomations.com/products/pl-sql-developer/)
 in the spirit of agentic coding tools such as Claude Code or OpenCode, but built for Oracle developers and
 for the IDE they already use. It talks to **any OpenAI-compatible chat completions endpoint** — a model
 on your own server (vLLM, Ollama, LM Studio, LiteLLM …) or a hosted API — so you decide where your code
