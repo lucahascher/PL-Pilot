@@ -643,6 +643,7 @@ namespace PlsqlDevAgent.Testing
                 {
                     await SqlThreadChecks(plugin.Ide, AgentConfig.Load());
                     await SchemaChecks(plugin.Ide, AgentConfig.Load());
+                    await FastReadChecks(plugin.Ide, AgentConfig.Load());
                 }
                 Line($"\n**Total: {_pass} passed, {_fail} failed**");
             }
@@ -884,6 +885,146 @@ namespace PlsqlDevAgent.Testing
         /// The agent's current schema: a switch with execute_sql (ALTER SESSION, or a PL/SQL block) is seen at once
         /// instead of the remembered schema and counted, so the agent session switches back at the end of a request.
         /// </summary>
+        /// <summary>
+        /// Source read in joined rows (the same text as line by line, also when a very long line forces the fallback),
+        /// line ranges and the output limit, Oracle's estimate without touching a transaction, the slow query
+        /// confirmation, the row limit in real queries, the runtime note and identical parallel queries.
+        /// </summary>
+        private static async Task FastReadChecks(IIde ide, AgentConfig cfg)
+        {
+            Line("\n## 8c. Reads and slow statements");
+            var ctx = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+            string owner = await Task.Run(() => ctx.CurrentSchema);
+            string PerLine(string name, string type) => string.Concat(ide.Query(
+                $"select text from all_source where owner = '{owner}' and name = '{name}' and type = '{type}' order by line", 200000).Rows.Select(r => r[0]));
+            // a slow query (about 1-2 s) that Oracle estimates as fast
+            const string slowQuery = "select count(*) n from (select level l from dual connect by level <= 1000000) a, " +
+                                     "(select level l from dual connect by level <= 6) b where mod(a.l + b.l, 7) = 0";
+            try
+            {
+                // a 2,700-line body (with umlauts) and a procedure with a line of 3,991 bytes: its joined row would exceed 4,000 bytes
+                var body = new StringBuilder("create or replace package body pda_big_src is\n");
+                for (int i = 1; i <= 300; i++)
+                    body.Append($"  procedure p{i} is\n    l number;\n  begin\n    l := {i} * 2; -- line of procedure {i}, äöü\n" +
+                                $"    if l > 0 then\n      dbms_output.put_line('p{i}: ' || l);\n    end if;\n  end p{i};\n\n");
+                body.Append("end pda_big_src;");
+                var created = await Task.Run(() => new[]
+                {
+                    ide.Execute("create or replace package pda_big_src is\n  procedure p1;\nend pda_big_src;"),
+                    ide.Execute(body.ToString()),
+                    ide.Execute("create or replace procedure pda_long_line is\n  s varchar2(4000) := '" + new string('x', 3965) + "';\nbegin\n  null;\nend;"),
+                    ide.Execute("create table pda_est_t as select level id, mod(level, 97) grp from dual connect by level <= 100000"),
+                });
+                Check("test objects created: " + string.Join(", ", created.Where(c => !c.Ok).Select(c => c.ErrorMessage)), created.All(c => c.Ok || c.ErrorCode == 955));
+
+                // 1. joined rows give exactly the text of the line-by-line read
+                foreach (var (name, type) in new[] { ("PDA_BIG_SRC", "PACKAGE BODY"), ("PDA_BIG_SRC", "PACKAGE"), ("PDA_LONG_LINE", "PROCEDURE"), ("EMP_API", "PACKAGE BODY") })
+                {
+                    var joined = await Task.Run(() => Db.ReadSource(ctx, owner, name, type));
+                    var plain = await Task.Run(() => PerLine(name, type));
+                    Check($"{type} {name}: joined read = line-by-line read ({joined.Text.Length} chars, lines {joined.FirstLine}-{joined.LastLine} of {joined.TotalLines})",
+                        joined.Text == plain && plain.Length > 0 && joined.LastLine == joined.TotalLines);
+                }
+                Check("Db.CurrentSource (backups, rewind) of the long-line procedure is complete",
+                    await Task.Run(() => Db.CurrentSource(ctx, "PROCEDURE", owner, "PDA_LONG_LINE")) == "CREATE OR REPLACE " + (await Task.Run(() => PerLine("PDA_LONG_LINE", "PROCEDURE"))).TrimEnd('\n', '\r', ' '));
+                try
+                {
+                    // network round trips of the two ways (needs V$MYSTAT; only reported)
+                    long Trips() => long.Parse(ide.Query("select s.value from v$mystat s join v$statname n on n.statistic# = s.statistic# " +
+                                                         "where n.name = 'SQL*Net roundtrips to/from client'", 1).Rows[0][0]);
+                    var trips = await Task.Run(() =>
+                    {
+                        long t0 = Trips(); PerLine("PDA_BIG_SRC", "PACKAGE BODY"); long t1 = Trips();
+                        Db.ReadSource(ctx, owner, "PDA_BIG_SRC", "PACKAGE BODY"); long t2 = Trips();
+                        return (t1 - t0 - 2, t2 - t1 - 2);
+                    });
+                    Line($"Round trips for the 2,700-line body: line by line {trips.Item1}, joined rows {trips.Item2}");
+                }
+                catch (OracleSqlException) { Line("(round trips not measured: no access to V$MYSTAT)"); }
+
+                // 2. line ranges and the output limit
+                int total = (await Task.Run(() => Db.ReadSource(ctx, owner, "PDA_BIG_SRC", "PACKAGE BODY", 1, 1))).TotalLines;
+                var range = await Tool(ctx, "get_object_source", new JObject { ["name"] = "pda_big_src", ["object_type"] = "PACKAGE BODY", ["start_line"] = 1500, ["end_line"] = 1505, ["with_line_numbers"] = true }, $"lines 1500-1505 of {total}");
+                var line1500 = await Task.Run(() => ide.Query($"select text from all_source where owner = '{owner}' and name = 'PDA_BIG_SRC' and type = 'PACKAGE BODY' and line = 1500", 1).Rows[0][0]);
+                Line($"Stored line 1500: [{line1500.Replace("\n", "\\n").Replace("\r", "\\r")}]");
+                Check("line 1500 is numbered 1500 and has the stored text", range.Contains("1500: " + line1500.TrimEnd('\n', '\r')) && !range.Contains("1506:"));
+                var whole = await Tool(ctx, "get_object_source", new JObject { ["name"] = "pda_big_src" }, "output limit reached after line");
+                var cont = System.Text.RegularExpressions.Regex.Match(whole, $@"PACKAGE BODY \S+: output limit reached after line (\d+) of {total}\. NOT shown: .*start_line (\d+)");
+                Check($"the whole package fits the output limit ({whole.Length} of {cfg.MaxToolOutputChars} chars) and says where to continue",
+                    whole.Length <= cfg.MaxToolOutputChars && cont.Success && int.Parse(cont.Groups[2].Value) == int.Parse(cont.Groups[1].Value) + 1);
+                Check("the cut is announced at the top and the procedures not shown are listed with their lines (p300 at line 2693)",
+                    whole.Contains("too long for one answer") && whole.Contains("p300 (line 2693)"));
+                if (cont.Success)
+                {
+                    var rest = await Tool(ctx, "get_object_source", new JObject { ["name"] = "pda_big_src", ["object_type"] = "PACKAGE BODY", ["start_line"] = int.Parse(cont.Groups[2].Value) },
+                        $"lines {cont.Groups[2].Value}-");
+                    Check("reading on continues exactly after the last line shown", rest.Contains($"of {total}") && !rest.Contains("CREATE OR REPLACE"));
+                }
+
+                // 3. Oracle's estimate: read without running the query and without touching a transaction
+                // 10 billion row pairs: Oracle estimates minutes (never run here); a join on a column with 97 values is
+                // estimated (and runs) at about a second
+                const string cartesian = "select count(*) from pda_est_t a, pda_est_t b";
+                var est = await Task.Run(() => QueryRunner.Estimate(ctx, cartesian));
+                var join = await Task.Run(() => QueryRunner.Estimate(ctx, "select count(*) from pda_est_t a, pda_est_t b where a.grp = b.grp"));
+                var small = await Task.Run(() => QueryRunner.Estimate(ctx, "select ename from emp where empno = 7839"));
+                Line($"Estimates: cartesian product of 100,000 x 100,000 rows {est?.Describe() ?? "none"}; join on GRP {join?.Describe() ?? "none"}; " +
+                     $"one row by primary key {small?.Describe() ?? "none"}");
+                Check("Oracle estimates the cartesian product as slow and the primary key lookup as fast", est != null && est.Seconds >= 60 && small != null && small.Seconds <= 2);
+                Check("the estimate leaves no transaction behind", ide.PendingTransaction == null);
+                await Task.Run(() => ide.Execute("update emp set sal = sal where empno = 7839"));
+                var txn = ide.PendingTransaction;
+                await Task.Run(() => QueryRunner.Estimate(ctx, cartesian));
+                Check("an open transaction of the agent is not touched by the estimate", txn != null && ide.PendingTransaction == txn);
+                await Task.Run(() => ide.Execute("rollback"));
+
+                // 4. slow by estimate: the user is asked; declined, nothing runs
+                int asked = 0;
+                var careful = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => { asked++; return Task.FromResult(new ApprovalResult { Approved = false, Feedback = "too slow" }); } };
+                var sw = Stopwatch.StartNew();
+                await Tool(careful, "run_query", new JObject { ["sql"] = cartesian }, "Not executed: Oracle estimates");
+                Check($"the user was asked once and the declined query did not run ({sw.ElapsedMilliseconds} ms)", asked == 1 && sw.ElapsedMilliseconds < 3000);
+
+                // 5. the row limit inside the query returns the same rows as the query as written
+                foreach (var sql in new[]
+                {
+                    "select ename, sal from emp order by sal desc, ename",
+                    "select e.deptno, d.deptno from emp e join dept d on d.deptno = e.deptno order by e.empno",
+                    "with x as (select * from emp) select ename from x where sal > 1000 order by ename",
+                    "select empno from emp union select deptno from dept order by 1",
+                    "select ename from emp order by sal desc, ename fetch first 3 rows only",
+                })
+                {
+                    var limited = await QueryRunner.RunAsync(ctx, sql, 5);
+                    var plain = SqlUtil.FormatResult(await Task.Run(() => ide.Query(sql, 5)), cfg.MaxToolOutputChars);
+                    Check("row limit inside the query, same result: " + sql, limited == plain);
+                }
+
+                // 6. the runtime of a slow query is reported; 7. identical parallel queries run once
+                var timed = await Tool(ctx, "run_query", new JObject { ["sql"] = slowQuery }, "(The query took ");
+                var took = System.Text.RegularExpressions.Regex.Match(timed, @"took ([\d.]+) s");
+                var single = took.Success ? double.Parse(took.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) : 0;
+                var helperA = ctx.ForHelper(System.Threading.CancellationToken.None, r => Task.FromResult(ApprovalResult.Yes()));
+                var helperB = ctx.ForHelper(System.Threading.CancellationToken.None, r => Task.FromResult(ApprovalResult.Yes()));
+                sw = Stopwatch.StartNew();
+                // helper B asks while helper A's query already runs (its estimate would queue behind that query)
+                var first = QueryRunner.RunAsync(helperA, slowQuery, 5);
+                await Task.Delay(300);
+                var both = await Task.WhenAll(first, QueryRunner.RunAsync(helperB, slowQuery, 5));
+                var parallel = sw.Elapsed.TotalSeconds;
+                Line($"One run {single:0.0} s; two identical parallel runs {parallel:0.0} s");
+                Check("two helpers with the identical query: it ran once, both got the result",
+                    both.Count(b => b.Contains("result is shared")) == 1 && both.All(b => b.Contains("N")) && parallel < single * 1.6 + 0.5);
+            }
+            finally
+            {
+                await Task.Run(() =>
+                {
+                    foreach (var drop in new[] { "drop package pda_big_src", "drop procedure pda_long_line", "drop table pda_est_t purge" }) ide.Execute(drop);
+                });
+            }
+        }
+
         private static async Task SchemaChecks(IIde ide, AgentConfig cfg)
         {
             Line("\n## 8b. Current schema");

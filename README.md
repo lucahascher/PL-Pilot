@@ -149,6 +149,9 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 ¹ Queries only read. INSERT / UPDATE / DELETE / MERGE are measured only with your approval and rolled back
 afterwards; not in plan mode or on protected connections.
 
+Large PL/SQL units are read in parts: `get_object_source` takes `start_line` / `end_line`, and a unit longer
+than the output limit ends with a list of the subprograms it did not show, with their line numbers.
+
 ## Safety model
 
 **Approvals.** Every change — editor edits, file writes, compiling, executing statements — is shown as a
@@ -172,6 +175,8 @@ transaction; its queries run on a background thread, so PL/SQL Developer stays r
 uncommitted changes are listed above the input with **Commit** / **Rollback**, and closing PL/SQL
 Developer asks what to do with them. The agent works in your schema and qualifies objects of other schemas;
 if it has to switch the session's schema, it is switched back at the end of the request (also after *Stop*).
+Because a running statement cannot be stopped, Oracle's runtime estimate (`EXPLAIN PLAN`, not executed) is read
+before each query of the agent; at 60 seconds or more you are asked first (setting *Confirm Slow Queries*).
 
 **Undo.** Before a PL/SQL unit or view is replaced or dropped, its current source is backed up
 (*Restore previous*). Every editor or file edit has a *Revert* button. **Rewind** on a user message (or

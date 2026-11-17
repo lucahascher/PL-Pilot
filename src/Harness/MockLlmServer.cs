@@ -114,6 +114,11 @@ namespace PlsqlDevAgent.Harness
             if (system.StartsWith("You are a research helper"))
             {
                 var task = (string)messages[1]["content"] ?? "";
+                // helpers that run exactly the same (slow) query at the same time
+                if (task.Contains("SAMEQUERY"))
+                    return role == "user"
+                        ? ToolCall("sq_1", "run_query", new JObject { ["sql"] = "select owner, count(*) from pda_slow_objects group by owner" })
+                        : Final("Findings: " + ((string)last["content"] ?? "").Replace("\n", " "));
                 int p = task.IndexOf("PARALLEL research ", StringComparison.Ordinal);
                 var label = p >= 0 ? " for " + task.Substring(p + 18, 1) : "";
                 return role == "user"
@@ -202,6 +207,11 @@ namespace PlsqlDevAgent.Harness
                 return edited ? Final("Step two done.")
                     : ToolCall("rw_two", "edit_editor", new JObject { ["old_string"] = "where e.deptno = p_deptno", ["new_string"] = "where e.deptno = p_deptno and e.sal > 0" });
             }
+
+            if (request.Contains("SAMEQUERY"))
+                return calls.Contains("run_subtask")
+                    ? Final("The helpers reported.")
+                    : ToolCalls(new[] { "A", "B", "C" }.Select((x, i) => ("sq_" + i, "run_subtask", new JObject { ["task"] = "SAMEQUERY research " + x })).ToArray());
 
             if (request.Contains("PARALLEL"))
             {
@@ -294,6 +304,8 @@ namespace PlsqlDevAgent.Harness
         public static string LastUserContent = "";
         /// <summary>All messages of the most recent main-agent request.</summary>
         public static string LastMessagesJson = "";
+        /// <summary>The messages of every main-agent request (to see whether earlier messages stayed unchanged).</summary>
+        public static readonly System.Collections.Generic.List<JArray> MainRequests = new System.Collections.Generic.List<JArray>();
 
         private static System.Collections.Generic.IEnumerable<JObject> Script(JObject request)
         {
@@ -304,6 +316,7 @@ namespace PlsqlDevAgent.Harness
             {
                 LastSystemPrompt = system;
                 LastMessagesJson = messages.ToString(Formatting.None);
+                lock (MainRequests) MainRequests.Add((JArray)messages.DeepClone());
                 var lastUserMsg = messages.OfType<JObject>().LastOrDefault(m => (string)m["role"] == "user");
                 if (lastUserMsg != null) LastUserContent = (string)lastUserMsg["content"] ?? "";
             }
@@ -366,7 +379,11 @@ namespace PlsqlDevAgent.Harness
             yield return new JObject
             {
                 ["id"] = "chatcmpl-mock", ["object"] = "chat.completion.chunk", ["choices"] = new JArray(),
-                ["usage"] = new JObject { ["prompt_tokens"] = 9000 + messages.ToString().Length / 4, ["completion_tokens"] = 120, ["total_tokens"] = 9120 },
+                ["usage"] = new JObject
+                {
+                    ["prompt_tokens"] = 9000 + messages.ToString().Length / 4, ["completion_tokens"] = 120, ["total_tokens"] = 9120,
+                    ["prompt_tokens_details"] = new JObject { ["cached_tokens"] = 8000 },
+                },
             };
         }
     }

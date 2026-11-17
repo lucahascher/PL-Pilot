@@ -47,6 +47,11 @@ namespace PlsqlDevAgent.Agent
         /// database queries while typing; @NAME still attaches the object when the message is sent.
         /// </summary>
         public bool MentionSuggestions { get; set; } = true;
+        /// <summary>
+        /// Before a query of the model runs, Oracle estimates its runtime (EXPLAIN PLAN, not executed); at or above this
+        /// many seconds the user is asked first, because a running statement cannot be stopped. 0 = never ask.
+        /// </summary>
+        public int ConfirmSlowQuerySeconds { get; set; } = 60;
         public int MaxToolOutputChars { get; set; } = 40000;
         /// <summary>Rough size budget of the conversation; older tool outputs are shortened above it.</summary>
         public int ContextBudgetChars { get; set; } = 300000;

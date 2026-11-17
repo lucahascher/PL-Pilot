@@ -174,7 +174,7 @@ namespace PlsqlDevAgent.Harness
                 if (_prompt.StartsWith("Please improve"))
                 {
                     if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); }
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SpeedChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -894,6 +894,151 @@ namespace PlsqlDevAgent.Harness
             {
                 _ide.UsesOwnSession = true;
                 _ide.CurrentSchema = "SCOTT";
+            }
+        }
+
+        /// <summary>Content of the last tool result the model received.</summary>
+        private static string LastToolResult()
+        {
+            var messages = Newtonsoft.Json.Linq.JArray.Parse(MockLlmServer.LastMessagesJson);
+            return (string)messages.LastOrDefault(m => (string)m["role"] == "tool")?["content"] ?? "";
+        }
+
+        private System.Collections.Generic.List<string> ExecutedSince(int index)
+        {
+            lock (_ide.ExecutedSql) return _ide.ExecutedSql.Skip(index).ToList();
+        }
+
+        private int ExecutedCount() { lock (_ide.ExecutedSql) return _ide.ExecutedSql.Count; }
+
+        /// <summary>
+        /// Speed: the prompt cache entry in the log, shortening old tool outputs in one bigger step, source reads in
+        /// joined rows and by line range, the slow query estimate, the row limit in the query, the runtime note and
+        /// parallel helpers sharing one identical query.
+        /// </summary>
+        private async Task SpeedChecks()
+        {
+            await Js("document.getElementById('btnNew').click()");
+            await Task.Delay(600);
+            var editorBefore = Editor.Text;
+            Editor.Text = SampleCode;
+            try
+            {
+                // 1. the log says how much of the prompt the server took from its prompt cache
+                string log;
+                using (var f = new FileStream(PlsqlDevAgent.Util.Log.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var reader = new StreamReader(f)) log = reader.ReadToEnd();
+                Check("the log shows the server's prompt cache hits", System.Text.RegularExpressions.Regex.IsMatch(log, @"prompt cache 8000/\d+ tokens \(\d+ %\)"));
+
+                // 2. over the budget old tool outputs are shortened in one bigger step, so the beginning of the
+                //    conversation (what the server's prompt cache can reuse) stays unchanged for several steps
+                Editor.Text = SampleCode + string.Concat(Enumerable.Range(1, 40).Select(i => $"-- comment line {i} that makes the editor text longer\r\n"));
+                // (the budget must be large against the last 8 messages, which are never shortened: 300,000 by default)
+                _chat.ApplyConfigForTest(c => c.ContextBudgetChars = 30000);
+                int start;
+                lock (MockLlmServer.MainRequests) start = MockLlmServer.MainRequests.Count;
+                await SendAndWait(string.Join("\n", Enumerable.Repeat("TOOL: get_editor_text {}", 20)));
+                System.Collections.Generic.List<Newtonsoft.Json.Linq.JArray> requests;
+                lock (MockLlmServer.MainRequests) requests = MockLlmServer.MainRequests.Skip(start).ToList();
+                int changed = 0;
+                for (int i = 1; i < requests.Count; i++)
+                    if (!requests[i - 1].Zip(requests[i], (a, b) => Newtonsoft.Json.Linq.JToken.DeepEquals(a, b)).All(x => x)) changed++;
+                bool shortened = requests.Last().ToString().Contains("older tool output removed");
+                // shortening just below the budget changed one on every step from the 12th on (9 of 20)
+                Check($"over the budget earlier messages change only every few steps ({changed} of {requests.Count - 1} steps changed one)",
+                    shortened && changed > 0 && changed <= 4);
+                _chat.ApplyConfigForTest(c => c.ContextBudgetChars = new AgentConfig().ContextBudgetChars);
+                Editor.Text = SampleCode;
+                await Js("document.getElementById('btnNew').click()");
+                await Task.Delay(600);
+
+                // 3. get_object_source: lines joined into rows, line ranges, cut at the output limit with a note where to continue
+                int q = ExecutedCount();
+                await SendAndWait("TOOL: get_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\",\"start_line\":2,\"end_line\":4,\"with_line_numbers\":true}");
+                var src = LastToolResult();
+                Check("get_object_source with start_line 2 / end_line 4 returns those lines, numbered from 2",
+                    src.Contains("lines 2-4 of 8") && src.Contains("2:   procedure list_emps") && src.Contains("4:     for r in") && !src.Contains("5:"));
+                Check("the source is read as joined rows (LISTAGG)", ExecutedSince(q).Any(s => s.Contains("listagg(text)")));
+                _ide.FailJoinedSource = true;
+                q = ExecutedCount();
+                await SendAndWait("TOOL: get_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\",\"start_line\":2,\"end_line\":4,\"with_line_numbers\":true}");
+                Check("after ORA-01489 (very long line) the source is read line by line, same result",
+                    LastToolResult() == src && ExecutedSince(q).Any(s => s.StartsWith("select line, line last_line, total, text")));
+                _ide.FailJoinedSource = false;
+                // a long body with a procedure at its end, longer than the output limit
+                Editor.Text = SampleCode.Replace("end emp_api;\r\n", "") +
+                              string.Concat(Enumerable.Range(1, 40).Select(i => $"  -- comment line {i} of the long package body\r\n")) +
+                              "  procedure close_quarter is\r\n  begin\r\n    null;\r\n  end close_quarter;\r\nend emp_api;\r\n";
+                _chat.ApplyConfigForTest(c => c.MaxToolOutputChars = 2000);
+                await SendAndWait("TOOL: get_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\"}");
+                src = LastToolResult();
+                var next = System.Text.RegularExpressions.Regex.Match(src, @"output limit reached after line (\d+) of 52\. NOT shown: .*close_quarter \(line (\d+)\).*start_line (\d+)");
+                Check("a cut unit says so at the top, lists the subprograms it does not show and where to continue",
+                    src.Contains("too long for one answer") && next.Success && int.Parse(next.Groups[3].Value) == int.Parse(next.Groups[1].Value) + 1 && next.Groups[2].Value == "48");
+                if (next.Success)
+                {
+                    await SendAndWait("TOOL: get_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\",\"start_line\":" + next.Groups[2].Value + "}");
+                    Check("reading from the listed line returns that procedure", LastToolResult().Contains("lines 48-52 of 52") &&
+                        LastToolResult().Contains("procedure close_quarter") && LastToolResult().Contains("end emp_api;"));
+                }
+                _chat.ApplyConfigForTest(c => c.MaxToolOutputChars = new AgentConfig().MaxToolOutputChars);
+                Editor.Text = SampleCode;
+
+                // 4. a query Oracle estimates as slow asks first; declined it does not run, approved it runs with the row limit inside
+                _ide.EstimateSeconds = 120;
+                await Js("clearInterval(window.__autoApprove)");
+                const string slowSql = "TOOL: run_query {\"sql\":\"select * from emp order by sal desc\"}";
+                bool Ran(int from) => ExecutedSince(from).Any(s => s.StartsWith("select * from (") && s.Contains("order by sal desc") && s.Contains("rownum <= "));
+                q = ExecutedCount();
+                await Submit(slowSql);
+                bool asked = await WaitForCard();
+                var card = asked ? await Js("document.querySelector('.approval:not(.done)').innerText") : "";
+                Check("a query Oracle estimates at 2 minutes asks first", asked && card.Contains("Oracle estimates about 2 min"));
+                await Task.Delay(800);
+                if (asked) await Js("document.querySelector('.approval:not(.done) button[data-a=\"no\"]').click()");
+                await WaitIdle();
+                Check("declined: the query did not run and the model got the estimate",
+                    !Ran(q) && LastToolResult().StartsWith("Not executed: Oracle estimates about 2 min"));
+                q = ExecutedCount();
+                await Submit(slowSql);
+                asked = await WaitForCard();
+                await Task.Delay(800);
+                if (asked) await Js("document.querySelector('.approval:not(.done) button[data-a=\"yes\"]').click()");
+                await WaitIdle();
+                Check("approved: the query ran with the row limit inside (rownum)", asked && Ran(q));
+                await Js("clearInterval(window.__autoApprove)");
+                await Js(AutoApproveJs);
+                _ide.EstimateSeconds = 1;
+                int cards = int.Parse(await Js("document.querySelectorAll('.approval').length"));
+                q = ExecutedCount();
+                await SendAndWait(slowSql);
+                Check("a query estimated below the limit runs without asking",
+                    Ran(q) && int.Parse(await Js("document.querySelectorAll('.approval').length")) == cards);
+                _chat.ApplyConfigForTest(c => c.ConfirmSlowQuerySeconds = 0);
+                q = ExecutedCount();
+                await SendAndWait(slowSql);
+                Check("setting 0: no estimate is read", Ran(q) && !ExecutedSince(q).Any(s => s.Contains("PDA_ESTIMATE")));
+                _chat.ApplyConfigForTest(c => c.ConfirmSlowQuerySeconds = new AgentConfig().ConfirmSlowQuerySeconds);
+
+                // 5. the model is told how long a query took (a second or more)
+                await SendAndWait("TOOL: run_query {\"sql\":\"select * from pda_slow_table\"}");
+                Check("the result says how long the query took: " + LastToolResult().Split('\n').Last(), System.Text.RegularExpressions.Regex.IsMatch(LastToolResult(), @"\(The query took 1\.\d s\.\)"));
+
+                // 6. three parallel helpers run exactly the same slow query: it runs once, all get the result
+                int Slow() { lock (_ide.ExecutedSql) return _ide.ExecutedSql.Count(s => s.StartsWith("select * from (") && s.Contains("pda_slow_objects")); }
+                int before = Slow();
+                await SendAndWait("SAMEQUERY research");
+                Check($"3 parallel helpers with the same query: it ran once ({Slow() - before} times)", Slow() - before == 1);
+                Check("the helpers that waited were told that the result is shared",
+                    System.Text.RegularExpressions.Regex.Matches(MockLlmServer.LastMessagesJson, "result is shared").Count == 2);
+            }
+            finally
+            {
+                Editor.Text = editorBefore;
+                _ide.FailJoinedSource = false;
+                _ide.EstimateSeconds = 1;
+                await Js("clearInterval(window.__autoApprove)"); // exactly one auto-approver (later checks stop it)
+                await Js(AutoApproveJs);
             }
         }
 

@@ -458,6 +458,7 @@ namespace PlsqlDevAgent.Agent
                 }
                 Log.Info($"LLM turn {step + 1}: {turn.Content.Length} chars, {turn.Reasoning.Length} reasoning chars, " +
                          $"tools [{string.Join(", ", turn.ToolCalls.Select(c => c.Name))}], finish={turn.FinishReason ?? "-"}" +
+                         PromptCacheInfo(turn.Usage) +
                          (turn.Usage != null ? $", usage {turn.Usage.ToString(Formatting.None)}" : ""));
                 ReportUsage(turn, sentChars);
 
@@ -752,6 +753,19 @@ namespace PlsqlDevAgent.Agent
             });
         }
 
+        /// <summary>
+        /// ", prompt cache 6768/6818 tokens (99 %)" if the server reports how much of the prompt it took from its prompt
+        /// cache (OpenAI style prompt_tokens_details.cached_tokens, DeepSeek prompt_cache_hit_tokens), else "".
+        /// </summary>
+        internal static string PromptCacheInfo(JObject usage)
+        {
+            if (usage == null) return "";
+            var cached = (int?)(usage["prompt_tokens_details"] as JObject)?["cached_tokens"] ?? (int?)usage["prompt_cache_hit_tokens"];
+            var prompt = (int?)usage["prompt_tokens"] ?? 0;
+            if (cached == null || prompt <= 0) return "";
+            return $", prompt cache {cached}/{prompt} tokens ({100L * cached.Value / prompt} %)";
+        }
+
         private void ReportUsage(AssistantTurn turn, int sentChars)
         {
             CheckContextWindowOnce();
@@ -843,6 +857,13 @@ namespace PlsqlDevAgent.Agent
             return sb.ToString();
         }
 
+        /// <summary>
+        /// Over the budget, old tool outputs are shortened down to this share of it in one go. Changing an early message
+        /// makes the LLM server process everything after it again (its prompt cache only reuses an unchanged
+        /// beginning): shortening just below the budget would do that on almost every step, this only every few steps.
+        /// </summary>
+        internal const int ShortenToPercent = 70;
+
         /// <summary>System prompt + history; shortens old tool outputs when the conversation gets too large.</summary>
         private JArray BuildMessages()
         {
@@ -850,7 +871,8 @@ namespace PlsqlDevAgent.Agent
             if (total > Config.ContextBudgetChars)
             {
                 int protectedTail = 8;
-                for (int i = 0; i < _history.Count - protectedTail && total > Config.ContextBudgetChars; i++)
+                long target = (long)Config.ContextBudgetChars * ShortenToPercent / 100;
+                for (int i = 0; i < _history.Count - protectedTail && total > target; i++)
                 {
                     var m = (JObject)_history[i];
                     if ((string)m["role"] != "tool") continue;

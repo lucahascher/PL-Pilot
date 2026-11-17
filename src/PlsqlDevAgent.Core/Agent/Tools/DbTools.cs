@@ -76,16 +76,77 @@ namespace PlsqlDevAgent.Agent.Tools
             "PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY", "JAVA SOURCE",
         };
 
+        /// <summary>Lines of one PL/SQL unit as read by <see cref="ReadSource"/>.</summary>
+        public sealed class SourceText
+        {
+            /// <summary>The lines as stored (each ends with a line feed), joined.</summary>
+            public string Text = "";
+            /// <summary>First and last line read (0 if none), and the number of lines of the whole unit (0 if unknown).</summary>
+            public int FirstLine, LastLine, TotalLines;
+            /// <summary>All requested lines were read (false: stopped at <c>maxChars</c>).</summary>
+            public bool Complete = true;
+        }
+
+        /// <summary>Bytes per row when <see cref="ReadSource"/> joins source lines on the server (VARCHAR2 limit 4,000).</summary>
+        private const int SourceChunkBytes = 3000;
+
+        /// <summary>
+        /// Reads lines <paramref name="fromLine"/>..<paramref name="toLine"/> (0 = to the end) of a PL/SQL unit. The
+        /// lines are joined into rows of about 3,000 bytes on the server: PL/SQL Developer fetches only about 25 rows
+        /// per network round trip, so a 3,000-line body needs 3 round trips instead of about 120. With
+        /// <paramref name="maxChars"/> &gt; 0 it stops after at least that many characters (the rest is not transferred).
+        /// Falls back to one row per line if a row would exceed the VARCHAR2 limit (ORA-01489, very long lines) or the
+        /// database has no LISTAGG.
+        /// </summary>
+        public static SourceText ReadSource(ToolContext ctx, string owner, string name, string type, int fromLine = 1, int toLine = 0, int maxChars = 0)
+        {
+            fromLine = Math.Max(1, fromLine);
+            string unit = $"select line, text, count(*) over () total from all_source where owner = {Lit(owner)} and name = {Lit(name)} and type = {Lit(type)}";
+            string range = $"line >= {fromLine}" + (toLine > 0 ? $" and line <= {toLine}" : "");
+            var result = new SourceText();
+            var sb = new StringBuilder();
+            QueryResult r;
+            try
+            {
+                r = ctx.Ide.Query(
+                    "select min(line), max(line), max(total), listagg(text) within group (order by line) from (" +
+                    $"select line, text, total, trunc(sum(lengthb(text)) over (order by line) / {SourceChunkBytes}) bucket " +
+                    $"from ({unit}) where {range}) group by bucket order by bucket",
+                    maxChars > 0 ? maxChars / 1000 + 2 : 100000);
+            }
+            catch (OracleSqlException ex)
+            {
+                Log.Info($"Joined source read failed ({ex.Message.Split('\n')[0]}), reading {type} {owner}.{name} line by line");
+                r = ctx.Ide.Query($"select line, line last_line, total, text from ({unit}) where {range} order by line", maxChars > 0 ? maxChars / 10 + 1000 : 200000);
+            }
+            foreach (var row in r.Rows)
+            {
+                if (result.FirstLine == 0) result.FirstLine = int.Parse(row[0]);
+                result.LastLine = int.Parse(row[1]);
+                result.TotalLines = int.Parse(row[2]);
+                sb.Append(row[3]);
+                if (maxChars > 0 && sb.Length >= maxChars) break;
+            }
+            result.Text = sb.ToString();
+            result.Complete = !r.Truncated && (maxChars <= 0 || result.LastLine >= (toLine > 0 ? Math.Min(toLine, result.TotalLines) : result.TotalLines));
+            if (r.Rows.Count == 0 && fromLine > 1)
+            {
+                // no line in the range: how long is the unit?
+                var count = ctx.Ide.Query($"select count(*) from all_source where owner = {Lit(owner)} and name = {Lit(name)} and type = {Lit(type)}", 1);
+                result.TotalLines = count.Rows.Count > 0 ? int.Parse(count.Rows[0][0]) : 0;
+            }
+            return result;
+        }
+
         /// <summary>Current CREATE OR REPLACE source of a PL/SQL unit or view, or null if it does not exist.</summary>
         public static string CurrentSource(ToolContext ctx, string type, string owner, string name)
         {
             type = (type ?? "").ToUpperInvariant();
             if (PlsqlSourceTypes.Contains(type))
             {
-                var r = ctx.Ide.Query(
-                    $"select text from all_source where owner = {Lit(owner)} and name = {Lit(name)} and type = {Lit(type)} order by line", 200000);
-                if (r.Rows.Count == 0) return null;
-                return "CREATE OR REPLACE " + string.Concat(r.Rows.Select(x => x[0])).TrimEnd('\n', '\r', ' ');
+                var src = ReadSource(ctx, owner, name, type);
+                if (src.FirstLine == 0) return null;
+                return "CREATE OR REPLACE " + src.Text.TrimEnd('\n', '\r', ' ');
             }
             if (type == "VIEW")
             {
@@ -223,15 +284,7 @@ namespace PlsqlDevAgent.Agent.Tools
             var sql = PrepareStatement(ReqStr(args, "sql"));
             if (!IsReadOnlyQuery(sql, out var reason)) return Task.FromResult("Not executed: " + reason);
             int max = Math.Max(1, Math.Min(Int(args, "max_rows", 50), ctx.Config.MaxQueryRows));
-            try
-            {
-                var r = ctx.Ide.Query(sql, max);
-                return Task.FromResult(FormatResult(r, ctx.Config.MaxToolOutputChars));
-            }
-            catch (OracleSqlException ex)
-            {
-                return Task.FromResult("Query failed: " + ex.Message);
-            }
+            return QueryRunner.RunAsync(ctx, sql, max);
         }
 
         internal static string OneLine(string s)
@@ -472,12 +525,18 @@ namespace PlsqlDevAgent.Agent.Tools
         public override string Name => "get_object_source";
         public override string Description =>
             "Returns the source / DDL of a database object as stored in the database: PL/SQL units (for a package the " +
-            "spec and body), views, triggers, types, and DDL for tables, indexes, sequences etc.";
+            "spec and body), views, triggers, types, and DDL for tables, indexes, sequences etc. Large units are cut at the " +
+            "output limit with a note where to continue; read further parts with start_line / end_line (for a package body " +
+            "use object_type PACKAGE BODY).";
         public override JObject Parameters => Schema(
             Req("name", "string", "Object name, optionally OWNER.NAME."),
             Opt("object_type", "string", "e.g. PACKAGE, PACKAGE BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, VIEW, TABLE. For PACKAGE both spec and body are returned."),
-            Opt("with_line_numbers", "boolean", "Prefix lines with line numbers (useful together with compile errors)."));
-        public override string Summarize(JObject args) => $"{Str(args, "object_type", "")} {Str(args, "name")}".Trim();
+            Opt("with_line_numbers", "boolean", "Prefix lines with line numbers (useful together with compile errors)."),
+            Opt("start_line", "integer", "First line to return (PL/SQL units; applies to each returned unit)."),
+            Opt("end_line", "integer", "Last line to return (PL/SQL units)."));
+        public override string Summarize(JObject args) =>
+            $"{Str(args, "object_type", "")} {Str(args, "name")}".Trim() +
+            (Int(args, "start_line", 0) > 0 || Int(args, "end_line", 0) > 0 ? $" lines {Math.Max(1, Int(args, "start_line", 1))}-{(Int(args, "end_line", 0) > 0 ? Int(args, "end_line", 0).ToString() : "")}" : "");
 
         private static readonly HashSet<string> SourceTypes = new HashSet<string>
         {
@@ -488,18 +547,22 @@ namespace PlsqlDevAgent.Agent.Tools
         {
             var obj = Db.ResolveOne(ctx, ReqStr(args, "name"), Str(args, "object_type"));
             bool numbers = Bool(args, "with_line_numbers", false);
+            int from = Math.Max(1, Int(args, "start_line", 1)), to = Math.Max(0, Int(args, "end_line", 0));
+            if (to > 0 && to < from) return Task.FromResult($"end_line ({to}) is before start_line ({from}).");
             var sb = new StringBuilder();
 
             if (SourceTypes.Contains(obj.Type))
             {
-                AppendSource(ctx, obj.Owner, obj.Name, obj.Type, numbers, sb);
+                // room for the header line and the notes; each unit is cut at a line boundary
+                int budget = ctx.Config.MaxToolOutputChars - 400;
+                AppendSource(ctx, obj, obj.Type, numbers, from, to, ref budget, sb);
                 if (obj.Type == "PACKAGE" || obj.Type == "TYPE")
                 {
                     var bodyType = obj.Type + " BODY";
                     if (Db.Resolve(ctx, obj.Owner + "." + obj.Name, bodyType).Count > 0)
                     {
                         sb.Append("\n/\n\n");
-                        AppendSource(ctx, obj.Owner, obj.Name, bodyType, numbers, sb);
+                        AppendSource(ctx, obj, bodyType, numbers, from, to, ref budget, sb);
                     }
                 }
             }
@@ -523,18 +586,89 @@ namespace PlsqlDevAgent.Agent.Tools
             return Task.FromResult(Db.Truncate($"-- {obj}\n" + sb, ctx.Config.MaxToolOutputChars));
         }
 
-        private static void AppendSource(ToolContext ctx, string owner, string name, string type, bool numbers, StringBuilder sb)
+        /// <summary>
+        /// Appends lines from..to of one unit, at most <paramref name="budget"/> characters (cut at a line boundary,
+        /// with a note where to continue). Only the lines that fit are transferred from the database.
+        /// </summary>
+        private static void AppendSource(ToolContext ctx, Db.ObjRef obj, string type, bool numbers, int from, int to, ref int budget, StringBuilder sb)
         {
-            var r = ctx.Ide.Query(
-                $"select text from all_source where owner = {Lit(owner)} and name = {Lit(name)} and type = {Lit(type)} order by line", 200000);
-            if (r.Rows.Count == 0)
+            string unit = $"{type} {obj.Owner}.{obj.Name}";
+            if (budget < 200)
             {
-                sb.Append($"-- (no source visible for {type} {owner}.{name})\n");
+                sb.Append($"-- [{unit} not shown: output limit reached. Read it with get_object_source, object_type '{type}'.]\n");
                 return;
             }
-            var text = string.Concat(r.Rows.Select(x => x[0]));
-            text = "CREATE OR REPLACE " + text.TrimEnd('\n', '\r', ' ');
-            sb.Append(numbers ? TextEdit.WithLineNumbers(text, 0, 0) : text).Append('\n');
+            var src = Db.ReadSource(ctx, obj.Owner, obj.Name, type, from, to, budget);
+            if (src.FirstLine == 0)
+            {
+                sb.Append(src.TotalLines > 0
+                    ? $"-- ({unit} has only {src.TotalLines} lines)\n"
+                    : $"-- (no source visible for {unit})\n");
+                return;
+            }
+            bool range = from > 1 || to > 0;
+            if (range) sb.Append($"-- {unit}, lines {src.FirstLine}-{src.LastLine} of {src.TotalLines}\n");
+
+            // the stored lines end with a line feed; the first line starts after CREATE OR REPLACE
+            var lines = src.Text.Replace("\r\n", "\n").TrimEnd('\n').Split('\n');
+            if (src.FirstLine == 1) lines[0] = "CREATE OR REPLACE " + lines[0];
+            int width = (src.FirstLine + lines.Length - 1).ToString().Length;
+            var outLines = lines.Select((line, i) => numbers ? (src.FirstLine + i).ToString().PadLeft(width) + ": " + line : line).ToList();
+            int end = to > 0 ? Math.Min(to, src.TotalLines) : src.TotalLines;
+            // too long: keep room for the list of the subprograms that are not shown
+            bool cut = !src.Complete || src.FirstLine + lines.Length - 1 < end || outLines.Sum(l => l.Length + 1) > budget;
+            int lineBudget = cut ? Math.Max(budget / 2, budget - OutlineChars - 300) : budget;
+            int shown = 0, used = 0;
+            var text = new StringBuilder();
+            foreach (var outLine in outLines)
+            {
+                if (used + outLine.Length + 1 > lineBudget && shown > 0) break;
+                text.Append(outLine).Append('\n');
+                used += outLine.Length + 1;
+                shown++;
+            }
+            int last = src.FirstLine + shown - 1;
+            if (last < end)
+                sb.Append($"-- [{unit} has {src.TotalLines} lines, too long for one answer: only lines {src.FirstLine}-{last} follow. " +
+                          $"Lines {last + 1}-{end} are NOT shown; the note at the end lists their subprograms.]\n");
+            // without line numbers the whole unit ends without trailing blanks (as compiled)
+            sb.Append(numbers ? text.ToString() : text.ToString().TrimEnd('\n', '\r', ' ') + "\n");
+            budget -= used;
+            if (last < end)
+            {
+                var outline = Outline(ctx, obj, type, last + 1, end);
+                sb.Append($"-- [{unit}: output limit reached after line {last} of {src.TotalLines}. NOT shown: lines {last + 1}-{end}" +
+                          (outline.Length > 0 ? $", with the subprograms {outline}" : "") +
+                          $". Read them with get_object_source name '{obj.Owner}.{obj.Name}', object_type '{type}', start_line {last + 1} " +
+                          "(or the line of a subprogram listed here), optionally end_line.]\n");
+                budget = Math.Min(budget, 0); // the next unit only gets a note
+            }
+        }
+
+        /// <summary>Most characters for the list of subprograms that a cut unit does not show.</summary>
+        private const int OutlineChars = 3000;
+
+        /// <summary>"close_quarter (line 2313), …": procedures and functions declared in lines from..to (one small query).</summary>
+        private static string Outline(ToolContext ctx, Db.ObjRef obj, string type, int fromLine, int toLine)
+        {
+            try
+            {
+                var r = ctx.Ide.Query(
+                    $"select line, text from all_source where owner = {Lit(obj.Owner)} and name = {Lit(obj.Name)} and type = {Lit(type)} " +
+                    $"and line between {fromLine} and {toLine} and regexp_like(text, '^\\s*(procedure|function)\\s', 'i') order by line", 2000);
+                var sb = new StringBuilder();
+                foreach (var row in r.Rows)
+                {
+                    var m = Regex.Match(row[1] ?? "", @"^\s*(procedure|function)\s+(""[^""]+""|[\w$#]+)", RegexOptions.IgnoreCase);
+                    if (!m.Success) continue;
+                    var item = $"{m.Groups[2].Value} (line {row[0]})";
+                    if (sb.Length + item.Length + 2 > OutlineChars) { sb.Append(", …"); break; }
+                    if (sb.Length > 0) sb.Append(", ");
+                    sb.Append(item);
+                }
+                return sb.ToString();
+            }
+            catch (OracleSqlException) { return ""; }
         }
     }
 
@@ -768,7 +902,9 @@ namespace PlsqlDevAgent.Agent.Tools
             bool returnsRows = kw == "SELECT" || kw == "WITH";
             // only a plain query skips the approval: a "query" with PL/SQL in its WITH clause can change and commit data
             bool readOnlyQuery = returnsRows && IsReadOnlyQuery(sql, out _);
-            var sensitive = readOnlyQuery ? null : SensitiveReason(sql);
+            // a plain query runs like run_query (estimate first, row limit in the query, runtime)
+            if (readOnlyQuery) return await QueryRunner.RunAsync(ctx, sql, Math.Min(50, ctx.Config.MaxQueryRows)).ConfigureAwait(false);
+            var sensitive = SensitiveReason(sql);
 
             if (!readOnlyQuery && (!ctx.Config.AutoApproveSql || sensitive != null))
             {
@@ -847,6 +983,7 @@ namespace PlsqlDevAgent.Agent.Tools
             }
 
             ExecResult res;
+            var watch = System.Diagnostics.Stopwatch.StartNew();
             if (IsPlsqlUnit(sql, out var ut, out var uo, out var un))
             {
                 // like compile_plsql: the unit keeps its stored compiler settings
@@ -857,6 +994,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 }
             }
             else res = ctx.Ide.Execute(sql);
+            var seconds = watch.Elapsed.TotalSeconds;
             if (res.Ok || res.CompiledWithErrors)
             {
                 foreach (var p in pending) Db.AfterChange(ctx, p);
@@ -886,6 +1024,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 sb.Append($"Executed successfully, with {diag.WarningCount} compiler warning{(diag.WarningCount == 1 ? "" : "s")}:\n{diag.Warnings}");
             else if (res.CompiledWithErrors) sb.Append("Executed, but the object has compilation errors (use get_compile_errors).");
             else sb.Append("FAILED: ").Append(res.ErrorMessage);
+            if (seconds >= 1) sb.Append($" (The statement took {seconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} s.)");
             if (!string.IsNullOrWhiteSpace(res.DbmsOutput)) sb.Append("\nDBMS_OUTPUT:\n").Append(Db.Truncate(res.DbmsOutput, ctx.Config.MaxToolOutputChars));
             if (res.Ok && IsDdl(sql))
             {

@@ -119,7 +119,11 @@ namespace PlsqlDevAgent.Util
             ["The answer was cut off because it reached the max tokens limit (Settings, Max tokens)."] = "Die Antwort wurde abgeschnitten, weil das Token-Limit erreicht wurde (Einstellungen, Max. Tokens).",
             ["The model returned an empty answer."] = "Das Modell hat eine leere Antwort geliefert.",
             ["Switched the session back from schema {0} to {1}, the schema you work in."] = "Die Sitzung wurde von Schema {0} zurück auf {1} umgestellt, das Schema, in dem Sie arbeiten.",
-            ["Could not switch the session back to schema {0}, the schema you work in: {1}"] = "Die Sitzung konnte nicht zurück auf Schema {0} umgestellt werden, das Schema, in dem Sie arbeiten: {1}",
+            ["Run a slow query? Oracle estimates {0}"] = "Langsame Abfrage ausführen? Oracle schätzt {0}",
+            ["about {0}"] = "etwa {0}",
+            ["Once it runs, the plug-in cannot stop the statement: the agent's database session stays busy until it finishes."] =
+                "Sobald sie läuft, kann das Plug-in die Anweisung nicht abbrechen: Die Datenbanksitzung des Agenten bleibt bis zum Ende belegt.",
+            ["Could not switch the session back to schema {0}, the schema you work in: {1}"] ="Die Sitzung konnte nicht zurück auf Schema {0} umgestellt werden, das Schema, in dem Sie arbeiten: {1}",
             ["The agent stopped with {0} open task(s). Send \"continue\" to let it go on."] = "Der Agent hat mit {0} offenen Aufgabe(n) angehalten. Mit „weiter“ arbeitet er weiter.",
             ["Compacting the conversation…"] = "Unterhaltung wird zusammengefasst…",
             ["Nothing to compact yet."] = "Noch nichts zum Zusammenfassen.",

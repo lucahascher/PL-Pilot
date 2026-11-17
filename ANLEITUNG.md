@@ -79,6 +79,8 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
   Debug-Informationen behält jede Einheit dabei. Abschaltbar unter **Einstellungen → Agent → Compiler-Warnungen**.
 - PL/Pilot kennt die **Oracle-Version** und die **NLS-Einstellungen** (z. B. Dezimalkomma) der Verbindung und
   schreibt Code passend dazu.
+- **Große Packages** liest der Agent abschnittsweise: Ist eine Einheit zu lang für eine Antwort, sieht er eine
+  Liste der übrigen Prozeduren und Funktionen mit Zeilennummern und liest gezielt weiter.
 - **Messen statt raten:** Bei Fragen wie „Ist diese Abfrage schneller?“ führt PL/Pilot beide Varianten aus,
   vergleicht Laufzeit und CPU-Zeit und prüft, dass beide dieselben Zeilen liefern. Mit Leserecht auf die V$-Views
   (z. B. `SELECT_CATALOG_ROLE`, beim DBA beantragen) zeigt er zusätzlich den tatsächlichen Ausführungsplan
@@ -99,6 +101,8 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
   Er führt kein `COMMIT` aus, wenn Sie es nicht ausdrücklich verlangen. Seine Abfragen laufen im Hintergrund:
   PL/SQL Developer bleibt auch bei langen Abfragen bedienbar. **Stoppen** (Esc) beendet das Warten sofort; eine
   bereits laufende Anweisung kann ein Plug-in aber nicht abbrechen – sie läuft in der Sitzung des Agents zu Ende.
+  Deshalb fragt PL/Pilot vorher, wenn Oracle eine Abfrage des Agents auf eine Minute oder mehr schätzt
+  (**Einstellungen → Agent → Langsame Abfragen bestätigen**; die Schätzung führt die Abfrage nicht aus).
 - Der Agent arbeitet in Ihrem Schema und qualifiziert Objekte anderer Schemas (`HR.EMPLOYEES`). Muss er das Schema
   der Sitzung doch einmal umstellen, stellt PL/Pilot es am Ende der Anfrage zurück (auch nach **Stoppen**).
 - **Nicht festgeschriebene Änderungen:** Datenänderungen des Agents (INSERT/UPDATE/DELETE) werden nicht automatisch

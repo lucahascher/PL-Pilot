@@ -183,10 +183,9 @@ namespace PlsqlDevAgent.Agent.Tools
                 var c = ctx.Ide.GetContext();
                 if (!c.HasEditor) return "";
                 var editor = Normalize(ctx.Ide.GetEditorText());
-                var rows = ctx.Ide.Query(
-                    $"select text from all_source where owner = {SqlUtil.Lit(owner)} and name = {SqlUtil.Lit(name)} and type = {SqlUtil.Lit(type)} order by line", 200000);
-                if (rows.Rows.Count == 0) return "";
-                var db = Normalize(string.Concat(rows.Rows.Select(r => r[0])));
+                var src = Db.ReadSource(ctx, owner, name, type);
+                if (src.FirstLine == 0) return "";
+                var db = Normalize(src.Text);
                 if (editor == db) return " The editor content matches the version compiled in the database.";
                 return "\nWARNING: the text in this editor window DIFFERS from the version compiled in the database" +
                        (c.Modified ? " (the window has unsaved changes)" : " (the window was probably already open with an older or newer version)") +

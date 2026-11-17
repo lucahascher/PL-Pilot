@@ -233,6 +233,35 @@ namespace PlsqlDevAgent.Agent.Tools
         /// <summary>How often <see cref="SessionMayHaveChanged"/> was called (in this context and its copies).</summary>
         public int SessionChanges => Volatile.Read(ref _schema.SessionChanges);
 
+        /// <summary>Queries that are running right now, shared by this context and its copies (see <see cref="SharedQuery"/>).</summary>
+        private System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<QueryResult>> _running =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<QueryResult>>();
+
+        /// <summary>
+        /// Runs a read-only query. If exactly the same query is already running or waiting in the agent's session for a
+        /// parallel tool call (helper agents), it is not run a second time: both get that result, which is as current as
+        /// the second run would be. Nothing is kept after the query has finished.
+        /// </summary>
+        public QueryResult SharedQuery(string sql, int maxRows, out bool shared)
+        {
+            var key = maxRows + "|" + sql;
+            var mine = new Lazy<QueryResult>(() => Ide.Query(sql, maxRows), LazyThreadSafetyMode.ExecutionAndPublication);
+            var entry = _running.GetOrAdd(key, mine);
+            shared = !ReferenceEquals(entry, mine);
+            try { return entry.Value; }
+            finally
+            {
+                // only the caller that ran the query removes it (a later identical query runs again)
+                if (!shared) ((ICollection<KeyValuePair<string, Lazy<QueryResult>>>)_running).Remove(new KeyValuePair<string, Lazy<QueryResult>>(key, mine));
+            }
+        }
+
+        /// <summary>Exactly this query is running or waiting right now (for a parallel tool call).</summary>
+        public bool IsQueryRunning(string sql, int maxRows) => _running.ContainsKey(maxRows + "|" + sql);
+
+        /// <summary>The context of a helper agent (run_subtask): it cannot ask the user.</summary>
+        public bool IsHelper;
+
         /// <summary>
         /// A copy for one tool call with its own <see cref="UiMeta"/> (tool calls may run in parallel, e.g. helper
         /// agents); the schema cache is shared.
@@ -258,6 +287,7 @@ namespace PlsqlDevAgent.Agent.Tools
             copy.RecordChange = null;
             copy.SetTasks = null;
             copy.RunSubtask = null;
+            copy.IsHelper = true;
             return copy;
         }
 

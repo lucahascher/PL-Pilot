@@ -389,6 +389,7 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
     <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Sub-task Max Steps</div><div class="s-desc">Model turns a helper agent (run_subtask) may use for its research.</div><input id="SubtaskMaxSteps" type="number" min="1"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Sub-task Model</div><div class="s-desc">Model for helper agents (run_subtask), e.g. a smaller, faster model of your server. Empty = the main model.</div><input id="SubtaskModel" list="models"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Max Query Rows</div><input id="MaxQueryRows" type="number" min="1"></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Confirm Slow Queries (s)</div><div class="s-desc">Before a query of the agent runs, Oracle estimates its runtime (the query is not executed for that). At or above this many seconds you are asked first, because a running statement cannot be stopped. 0 = never ask.</div><input id="ConfirmSlowQuerySeconds" type="number" min="0"></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Agent: </span>Compiler Warnings</div><label><input type="checkbox" id="CompilerWarnings"><span class="s-desc">When the agent compiles PL/SQL, the Oracle compiler warnings (PLSQL_WARNINGS) are turned on and reported to it. The unit keeps this setting; warnings your settings treat as errors stay errors.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Agent: </span>Suggest Objects After @</div><label><input type="checkbox" id="MentionSuggestions"><span class="s-desc">Typing @ in the input box looks up matching database objects (two small queries each time you pause typing). Off: no database queries while you type; @NAME still attaches the object when you send the message.</span></label></div>
 
@@ -561,6 +562,9 @@ const DE = {
   'When the agent compiles PL/SQL, the Oracle compiler warnings (PLSQL_WARNINGS) are turned on and reported to it. The unit keeps this setting; warnings your settings treat as errors stay errors.':
     'Wenn der Agent PL/SQL kompiliert, werden die Compiler-Warnungen von Oracle (PLSQL_WARNINGS) eingeschaltet und ihm gemeldet. Die Einheit behält diese Einstellung; Warnungen, die Ihre Einstellungen als Fehler behandeln, bleiben Fehler.',
   'Suggest Objects After @': 'Objekte nach @ vorschlagen',
+  'Confirm Slow Queries (s)': 'Langsame Abfragen bestätigen (s)',
+  'Before a query of the agent runs, Oracle estimates its runtime (the query is not executed for that). At or above this many seconds you are asked first, because a running statement cannot be stopped. 0 = never ask.':
+    'Bevor eine Abfrage des Agenten läuft, schätzt Oracle ihre Laufzeit (die Abfrage wird dafür nicht ausgeführt). Ab so vielen Sekunden werden Sie vorher gefragt, weil eine laufende Anweisung nicht abgebrochen werden kann. 0 = nie fragen.',
   'Typing @ in the input box looks up matching database objects (two small queries each time you pause typing). Off: no database queries while you type; @NAME still attaches the object when you send the message.':
     'Beim Tippen von @ im Eingabefeld werden passende Datenbankobjekte gesucht (zwei kleine Abfragen bei jeder Tipp-Pause). Aus: keine Datenbankabfragen beim Tippen; @NAME hängt das Objekt beim Senden trotzdem an.',
   'Safety': 'Sicherheit', 'Safety:': 'Sicherheit:', 'Protected Connections': 'Geschützte Verbindungen',
@@ -1426,7 +1430,7 @@ function replay(events) {
 // ---------------------------------------------------------------- settings editor
 const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'DetectContextWindow', 'CompactAtPercent', 'RequestTimeoutSeconds', 'ExtraBodyJson',
   'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
-  'MaxQueryRows', 'CompilerWarnings', 'MentionSuggestions', 'ProtectedConnections', 'BackupBeforeChanges',
+  'MaxQueryRows', 'ConfirmSlowQuerySeconds', 'CompilerWarnings', 'MentionSuggestions', 'ProtectedConnections', 'BackupBeforeChanges',
   'SaveChatHistory', 'ChatHistoryContent', 'ChatRetentionDays', 'BackupRetentionDays', 'LogRetentionDays',
   'ReadOnlyMode', 'SeparateSession', 'UseDbaViews', 'AutoApproveEditorEdits', 'AutoApproveSql', 'AutoApproveFileWrites', 'DevTools', 'Theme', 'Language'];
 let settingsBase = {};
