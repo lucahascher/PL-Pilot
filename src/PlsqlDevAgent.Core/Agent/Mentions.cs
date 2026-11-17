@@ -105,7 +105,8 @@ namespace PlsqlDevAgent.Agent
             query = (query ?? "").Trim();
             try
             {
-                if (ctx.Ide.GetContext().Connected && !query.Contains("/") && !query.Contains("\\"))
+                // setting off: no database traffic while the user types (workspace files are still suggested)
+                if (ctx.Config.MentionSuggestions && !query.Contains("/") && !query.Contains("\\") && ctx.Ide.GetContext().Connected)
                 {
                     string owner = null, prefix = query;
                     if (query.Contains('.')) { owner = SqlUtil.Ident(query.Split('.')[0]); prefix = query.Split('.')[1]; }

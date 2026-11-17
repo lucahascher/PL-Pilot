@@ -122,6 +122,8 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 - **Commands:** type `/` — `/explain`, `/review`, `/document`, `/test`, `/optimize`, `/fix`, `/compact`,
   `/new`, `/help`, plus your own (`/name = prompt` in the settings or `.plsqlagent/commands/<name>.md`).
 - **Attach context:** `@EMP_API`, `@SCOTT.EMP`, `@scripts/deploy.sql` attach source, table descriptions or files.
+  While you type after `@`, matching objects are looked up in the database; turn this off with the setting
+  *Suggest Objects After @* (the mention still works when you send the message).
 - **Agent / Plan mode:** in *Plan* mode the agent only investigates and proposes a plan; *Execute plan*
   then carries it out.
 - **Longer tasks:** the agent keeps a task list above the input and continues by itself while tasks are

@@ -38,7 +38,7 @@ Daten gehen nur an diesen Server. Diese Kurzanleitung richtet sich an Anwender; 
 | Zu markiertem Code fragen | Code markieren → **Zur Auswahl fragen** oder Rechtsklick im Editor → **PL/Pilot fragen** |
 | Zu einem Datenbankobjekt fragen | Rechtsklick im Objekt-Browser → **PL/Pilot zu diesem Objekt fragen** |
 | Befehle | `/` tippen: `/explain`, `/review`, `/document`, `/test`, `/optimize`, `/fix`, `/compact`, `/new`, `/help` |
-| Objekte oder Dateien anhängen | `@` tippen, z. B. `@PKG_AUFTRAG` – Quelltext bzw. Tabellenbeschreibung wird mitgeschickt |
+| Objekte oder Dateien anhängen | `@` tippen, z. B. `@PKG_AUFTRAG` – Quelltext bzw. Tabellenbeschreibung wird mitgeschickt. Die Vorschläge beim Tippen fragen die Datenbank ab; abschaltbar mit der Einstellung *Objekte nach @ vorschlagen* |
 | Frühere Eingaben | `↑` / `↓` im leeren Eingabefeld |
 | Gespeicherte Chats | Uhr-Symbol im Chat-Kopf |
 

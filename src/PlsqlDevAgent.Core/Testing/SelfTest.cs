@@ -49,6 +49,7 @@ namespace PlsqlDevAgent.Testing
             else if (mode == "SEC-ONLY") await SqlRunAsync(plugin, securityOnly: true);
             else if (mode == "ANALYSIS-ONLY") await AnalysisRunAsync(plugin);
             else if (mode == "LLM-TOOLS") await LlmToolsRunAsync(plugin);
+            else if (mode == "CACHE-MEASURE") await CacheMeasureRunAsync(plugin);
             else if (mode != null && mode.StartsWith("PROMPT-ONLY:")) await PromptOnlyRunAsync(plugin, mode.Substring("PROMPT-ONLY:".Length).Trim());
             else await RunAsync(plugin);
         }
@@ -1244,6 +1245,146 @@ namespace PlsqlDevAgent.Testing
             Check("mention suggestions: " + string.Join(", ", suggestions.Select(s => (string)s["label"])), suggestions.Any(s => (string)s["label"] == "EMP_API"));
             var cmd = Commands.Find("/review focus on exceptions", ctx.Config, out var cmdArgs);
             Check("command /review expands with arguments", cmd != null && Commands.Expand(cmd, cmdArgs).Contains("focus on exceptions"));
+        }
+
+        /// <summary>
+        /// PLSQLDEVAGENT_AUTOTEST_PROMPT = "CACHE-MEASURE": times the dictionary reads a cache could save, through the real
+        /// plug-in interface (median of several runs after one warm-up run). Needs the PRB_SRC_* objects of the cache
+        /// investigation (packages with 250 to 10,000 body lines and the view PRB_SRC_V).
+        /// </summary>
+        private static async Task CacheMeasureRunAsync(Plugin plugin)
+        {
+            var ide = plugin.Ide;
+            try
+            {
+                Line("# PL/Pilot – read costs through the plug-in interface");
+                var cfg = AgentConfig.Load();
+                var ctx = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+                Line($"Separate session: {ide.UsesOwnSession}; MaxToolOutputChars {cfg.MaxToolOutputChars}\n");
+                Line("| What | runs | median ms | min | max | result |");
+                Line("|---|---|---|---|---|---|");
+
+                async Task Measure(string label, int runs, Func<string> action)
+                {
+                    string info = "";
+                    try
+                    {
+                        info = await Task.Run(action); // warm-up (parse, dictionary cache)
+                        var ms = new System.Collections.Generic.List<double>();
+                        for (int i = 0; i < runs; i++)
+                        {
+                            var sw = Stopwatch.StartNew();
+                            info = await Task.Run(action);
+                            ms.Add(sw.Elapsed.TotalMilliseconds);
+                        }
+                        ms.Sort();
+                        Line($"| {label} | {runs} | {ms[ms.Count / 2]:0.0} | {ms[0]:0.0} | {ms[ms.Count - 1]:0.0} | {info} |");
+                    }
+                    catch (Exception ex) { Line($"| {label} | – | – | – | – | ERROR {ex.GetBaseException().Message.Split('\n')[0]} |"); }
+                }
+                string Rows(string sql, int max = 200000)
+                {
+                    var r = ide.Query(sql, max);
+                    return $"{r.Rows.Count} rows, {r.Rows.Sum(x => x.Sum(c => (c ?? "").Length)):N0} chars";
+                }
+                string ToolRun(string name, JObject args)
+                {
+                    var res = ToolRegistry.All().First(t => t.Name == name).ExecuteAsync(args, ctx).GetAwaiter().GetResult();
+                    return $"{res.Length:N0} chars" + (res.Contains("[truncated") ? " (truncated)" : "");
+                }
+                const string excluded = "('PACKAGE BODY', 'TYPE BODY', 'INDEX PARTITION', 'TABLE PARTITION', 'LOB')";
+                string find = "select owner, object_name, object_type, status from all_objects where object_name = 'PRB_SRC_3000' " +
+                              $"and object_type not in {excluded} order by decode(owner, 'SCOTT', 0, 'PUBLIC', 2, 1), owner, object_type";
+                string findValidator = "select owner, object_name, object_type, status, to_char(object_id), to_char(last_ddl_time, 'YYYYMMDDHH24MISS'), " +
+                              "timestamp, to_char(sysdate, 'YYYYMMDDHH24MISS') from all_objects where object_name = 'PRB_SRC_3000' " +
+                              $"and object_type not in {excluded} order by decode(owner, 'SCOTT', 0, 'PUBLIC', 2, 1), owner, object_type";
+
+                await Measure("`select 1 from dual` (fixed cost per statement)", 30, () => Rows("select 1 from dual"));
+                await Measure("IDE main thread call (GetContext)", 30, () => { ide.GetContext(); return ""; });
+                await Measure("current schema query", 20, () => ctx.QueryCurrentSchema());
+                await Measure("Find (name lookup as in Db.Find)", 20, () => Rows(find));
+                await Measure("Find + validator columns (id, last_ddl_time, timestamp, sysdate)", 20, () => Rows(findValidator));
+                await Measure("Validator for 20 objects in one query", 20, () => Rows(
+                    "select object_name, object_type, object_id, last_ddl_time, timestamp, status from all_objects where owner = 'SCOTT' " +
+                    "and object_name in ('PRB_SRC_250','PRB_SRC_1000','PRB_SRC_3000','PRB_SRC_10000','PRB_SRC_V','EMP','DEPT','EMP_API'," +
+                    "'PRB_PKG','PRB_T','PRB_C','PRB_V','PRB_CALLER','PRB_TRG','PRB_SYN','PRB_BIG','PRB_TINY','PRB_SLOW','PRB_CTAS','X')"));
+                foreach (var size in new[] { "250", "1000", "3000", "10000" })
+                {
+                    await Measure($"ALL_SOURCE body PRB_SRC_{size}", 5, () => Rows(
+                        $"select text from all_source where owner = 'SCOTT' and name = 'PRB_SRC_{size}' and type = 'PACKAGE BODY' order by line"));
+                    await Measure($"get_object_source PRB_SRC_{size} (spec + body)", 5, () => ToolRun("get_object_source", new JObject { ["name"] = "PRB_SRC_" + size }));
+                }
+                await Measure("get_object_source PRB_SRC_3000 with line numbers", 5, () => ToolRun("get_object_source", new JObject { ["name"] = "PRB_SRC_3000", ["with_line_numbers"] = true }));
+                await Measure("ALL_ARGUMENTS PRB_SRC_3000 (334 procedures)", 5, () => Rows(
+                    "select object_name, overload, position, argument_name, in_out, data_type, type_name, defaulted from all_arguments " +
+                    "where owner = 'SCOTT' and package_name = 'PRB_SRC_3000' and data_level = 0 order by object_name, overload, sequence", 2000));
+                await Measure("describe_object PRB_SRC_3000 (signatures)", 5, () => ToolRun("describe_object", new JObject { ["name"] = "PRB_SRC_3000" }));
+                await Measure("describe_object PRB_SRC_250 (signatures)", 5, () => ToolRun("describe_object", new JObject { ["name"] = "PRB_SRC_250" }));
+                await Measure("View text via IDE_GetObjectSource (main thread)", 5, () => $"{ide.GetObjectSource("VIEW", "SCOTT", "PRB_SRC_V").Length:N0} chars");
+                await Measure("View DDL via DBMS_METADATA (CLOB in 1000-char rows)", 5, () => $"{Db.ReadClob(ctx, "dbms_metadata.get_ddl('VIEW', 'PRB_SRC_V', 'SCOTT')").Length:N0} chars");
+                await Measure("get_object_source PRB_SRC_V", 5, () => ToolRun("get_object_source", new JObject { ["name"] = "PRB_SRC_V" }));
+                await Measure("describe_object EMP (table, not cached in the plan)", 5, () => ToolRun("describe_object", new JObject { ["name"] = "EMP" }));
+                await Measure("list_objects (own schema)", 5, () => ToolRun("list_objects", new JObject()));
+                await Measure("search_source 'dbms_output' (own schema)", 5, () => ToolRun("search_source", new JObject { ["text"] = "dbms_output" }));
+                await Measure("Autocomplete Mentions.Suggest(\"PRB\")", 10, () => $"{Mentions.Suggest("PRB", ctx).Count} suggestions");
+
+                // network round trips per read (V$MYSTAT, needs SELECT_CATALOG_ROLE): at work each one costs the network latency
+                (long trips, long bytes) NetStats()
+                {
+                    var r = ide.Query("select n.name, s.value from v$mystat s join v$statname n on n.statistic# = s.statistic# " +
+                                      "where n.name in ('SQL*Net roundtrips to/from client', 'bytes sent via SQL*Net to client')", 5);
+                    long Get(string name) => long.Parse(r.Rows.First(x => x[0] == name)[1]);
+                    return (Get("SQL*Net roundtrips to/from client"), Get("bytes sent via SQL*Net to client"));
+                }
+                Line("\n| Read | network round trips | bytes sent to the client |");
+                Line("|---|---|---|");
+                async Task Trips(string label, Func<string> action)
+                {
+                    try
+                    {
+                        await Task.Run(() =>
+                        {
+                            var b0 = NetStats(); var b1 = NetStats(); // the statistics query itself
+                            var a0 = NetStats(); action(); var a1 = NetStats();
+                            Line($"| {label} | {(a1.trips - a0.trips) - (b1.trips - b0.trips)} | {(a1.bytes - a0.bytes) - (b1.bytes - b0.bytes):N0} |");
+                        });
+                    }
+                    catch (Exception ex) { Line($"| {label} | ERROR {ex.GetBaseException().Message.Split('\n')[0]} | |"); }
+                }
+                await Trips("`select 1 from dual`", () => Rows("select 1 from dual"));
+                await Trips("Find + validator columns", () => Rows(findValidator));
+                foreach (var size in new[] { "250", "1000", "3000", "10000" })
+                    await Trips($"ALL_SOURCE body PRB_SRC_{size}", () => Rows(
+                        $"select text from all_source where owner = 'SCOTT' and name = 'PRB_SRC_{size}' and type = 'PACKAGE BODY' order by line"));
+                // alternative: the lines joined into ~3,000-byte rows on the server (fewer round trips)
+                string Chunked(string name) =>
+                    "select listagg(text) within group (order by line) from (select line, text, " +
+                    "trunc(sum(lengthb(text)) over (order by line) / 3000) bucket from all_source " +
+                    $"where owner = 'SCOTT' and name = '{name}' and type = 'PACKAGE BODY') group by bucket order by bucket";
+                foreach (var size in new[] { "3000", "10000" })
+                {
+                    await Trips($"ALL_SOURCE body PRB_SRC_{size}, joined into ~3,000-byte rows", () => Rows(Chunked("PRB_SRC_" + size)));
+                    await Measure($"ALL_SOURCE body PRB_SRC_{size}, joined into ~3,000-byte rows", 5, () => Rows(Chunked("PRB_SRC_" + size)));
+                }
+                await Trips("get_object_source PRB_SRC_3000 (whole tool)", () => ToolRun("get_object_source", new JObject { ["name"] = "PRB_SRC_3000" }));
+                await Trips("describe_object PRB_SRC_3000 (whole tool)", () => ToolRun("describe_object", new JObject { ["name"] = "PRB_SRC_3000" }));
+                await Trips("View DDL via DBMS_METADATA", () => Db.ReadClob(ctx, "dbms_metadata.get_ddl('VIEW', 'PRB_SRC_V', 'SCOTT')"));
+                await Trips("describe_object EMP (whole tool)", () => ToolRun("describe_object", new JObject { ["name"] = "EMP" }));
+
+                // the autocomplete while the agent's statement runs: it queues behind it on the one SQL session
+                var slow = Task.Run(() => ide.Query(SlowQuery(3), 1));
+                await Task.Delay(300);
+                var wait = Stopwatch.StartNew();
+                await Task.Run(() => Mentions.Suggest("PRB", ctx));
+                Line($"\nAutocomplete while a 3 s statement runs: {wait.ElapsedMilliseconds} ms");
+                await slow;
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
         }
 
         private static void Check(string name, bool ok)

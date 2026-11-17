@@ -296,6 +296,16 @@ namespace PlsqlDevAgent.Harness
             await Js("(() => { const p = document.getElementById('popup'); p.querySelectorAll('.item')[1].dispatchEvent(new MouseEvent('mousedown')); })()");
             Check("choosing a mention inserts it", await Js("document.getElementById('input').value") == "look at @EMP_API ");
             await Js("document.getElementById('input').value = ''");
+            // setting "Suggest Objects After @" off: typing @ causes no database queries
+            _chat.ApplyConfigForTest(c => c.MentionSuggestions = false);
+            int LikeQueries() { lock (_ide.ExecutedSql) return _ide.ExecutedSql.Count(s => s.Contains("object_name like")); }
+            int likeBefore = LikeQueries();
+            await Js("(() => { const i = document.getElementById('input'); i.focus(); i.value = 'look at @EM'; i.setSelectionRange(11, 11); i.dispatchEvent(new Event('input')); })()");
+            await Task.Delay(1200);
+            Check($"mention suggestions off: no database query while typing ({LikeQueries() - likeBefore} queries)",
+                LikeQueries() == likeBefore && !(await Js("document.getElementById('popup').innerText")).Contains("EMP_API"));
+            await Js("document.getElementById('input').value = ''; closePopup();");
+            _chat.ApplyConfigForTest(c => c.MentionSuggestions = true);
 
             // @-mention attachment
             await SendAndWait("@EMP_API Answer briefly: what does it do?");
