@@ -174,7 +174,7 @@ namespace PlsqlDevAgent.Harness
                 if (_prompt.StartsWith("Please improve"))
                 {
                     if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); }
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -830,6 +830,63 @@ namespace PlsqlDevAgent.Harness
             Check("the model no longer sees the removed messages", !MockLlmServer.LastMessagesJson.Contains("REWINDTEST"));
         }
 
+        /// <summary>
+        /// The agent works in the user's schema: its own switch (execute_sql) is seen at once instead of a remembered
+        /// schema, and the session is switched back at the end of the request, also after Stop. With a session shared
+        /// with the user's windows, the agent starts in the schema they switched to and leaves it as it is.
+        /// </summary>
+        private async Task SchemaChecks()
+        {
+            await Js("document.getElementById('btnNew').click()");
+            await Task.Delay(600);
+            _ide.CurrentSchema = "SCOTT";
+            const string switchBack = "alter session set current_schema = \"SCOTT\"";
+            int SwitchBacks() { lock (_ide.ExecutedSql) return _ide.ExecutedSql.Count(s => s == switchBack); }
+
+            // the agent switches the schema in one request, the next request starts in the user's schema again
+            await SendAndWait("EXECSQL: alter session set current_schema = HR");
+            Check("execute_sql switched the session to HR", _ide.ExecutedSql.Contains("alter session set current_schema = HR"));
+            Check("at the end of the request the session is switched back to the user's schema SCOTT", _ide.CurrentSchema == "SCOTT" && SwitchBacks() == 1);
+            Check("the chat says that the session was switched back",
+                (await Js("document.getElementById('messages').innerText")).Contains("Switched the session back from schema HR to SCOTT"));
+            await SendAndWait("TOOL: get_ide_context {}");
+            Check("get_ide_context reports the user's schema SCOTT again", MockLlmServer.LastMessagesJson.Contains("(current schema SCOTT)"));
+            Check("the model is told that the session was switched back", MockLlmServer.LastUserContent.Contains("switched the session back from schema HR to the user's schema SCOTT"));
+
+            // within one request the switch is seen at once (the remembered schema is read again)
+            await SendAndWait("TOOL: execute_sql {\"sql\":\"alter session set current_schema = HR\"}\nTOOL: get_ide_context {}");
+            Check("get_ide_context right after the switch reports HR, not a remembered SCOTT", MockLlmServer.LastMessagesJson.Contains("(current schema HR)"));
+            Check("switched back to SCOTT at the end of that request", _ide.CurrentSchema == "SCOTT" && SwitchBacks() == 2);
+
+            // Stop after the switch: the session is switched back as well
+            await Submit("SLOWAFTERTOOL\nTOOL: execute_sql {\"sql\":\"alter session set current_schema = HR\"}");
+            for (int i = 0; i < 100 && _ide.CurrentSchema != "HR"; i++) await Task.Delay(100);
+            await Task.Delay(500);
+            Check("still working after the switch (slow model answer)", _ide.CurrentSchema == "HR" && _chat.IsBusy);
+            _chat.StopForTest();
+            for (int i = 0; i < 50 && (_chat.IsBusy || _ide.CurrentSchema != "SCOTT"); i++) await Task.Delay(100);
+            Check("after Stop the session is switched back to SCOTT as well", _ide.CurrentSchema == "SCOTT" && SwitchBacks() == 3);
+            await WaitIdle();
+
+            // a session shared with the user's windows: the agent starts in the schema the user switched to there
+            _ide.UsesOwnSession = false;
+            try
+            {
+                await SendAndWait("TOOL: get_ide_context {}"); // the agent now remembers SCOTT
+                Check("shared session: SCOTT before the user switches", MockLlmServer.LastMessagesJson.Contains("(current schema SCOTT)"));
+                _ide.CurrentSchema = "HR"; // the user ran ALTER SESSION SET CURRENT_SCHEMA = HR in a SQL window
+                await SendAndWait("TOOL: get_ide_context {}");
+                Check("shared session: the request starts in the schema of the user's windows (HR)",
+                    MockLlmServer.LastUserContent.Contains("current schema HR") && MockLlmServer.LastMessagesJson.Contains("(current schema HR)"));
+                Check("shared session: the user's schema is left as the user set it", _ide.CurrentSchema == "HR" && SwitchBacks() == 3);
+            }
+            finally
+            {
+                _ide.UsesOwnSession = true;
+                _ide.CurrentSchema = "SCOTT";
+            }
+        }
+
         /// <summary>Several run_subtask calls run in parallel; scrolling up stops following the output, scrolling down resumes it.</summary>
         private async Task ParallelAndScrollChecks()
         {
@@ -837,11 +894,15 @@ namespace PlsqlDevAgent.Harness
             await Js("document.getElementById('btnNew').click()");
             await Task.Delay(600);
             MockLlmServer.ExpectContinueRequests = 0;
+            int SchemaQueries() { lock (_ide.ExecutedSql) return _ide.ExecutedSql.Count(s => s.Contains("CURRENT_SCHEMA")); }
+            int schemaQueries = SchemaQueries();
             var sw = System.Diagnostics.Stopwatch.StartNew();
             await Js("document.getElementById('input').value = 'PARALLEL research three things'; submit();");
             for (int i = 0; i < 300 && !(await Js("document.getElementById('messages').innerText")).Contains("Parallel reports"); i++) await Task.Delay(100);
             var helpers = sw.Elapsed.TotalSeconds;
             Check($"3 helper agents ran in parallel ({helpers:0.0} s; one after the other takes more than 10 s)", helpers < 7);
+            schemaQueries = SchemaQueries() - schemaQueries;
+            Check($"the parallel helpers share the agent's schema, it is read once for the request ({schemaQueries} queries)", schemaQueries == 1);
             Check("each helper shows its steps under its own call", await Js("document.querySelectorAll('.substeps').length") == "3");
             Check("LLM requests do not wait for '100 Continue'", MockLlmServer.ExpectContinueRequests == 0);
 

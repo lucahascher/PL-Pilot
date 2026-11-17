@@ -77,7 +77,7 @@ namespace PlsqlDevAgent.Harness
             }
             // impact analysis and compiler settings: nothing depends on anything in the simulated database
             else if (s.Contains("ALL_DEPENDENCIES") || s.Contains("ALL_PLSQL_OBJECT_SETTINGS") || s.Contains("V$PARAMETER")) r.Columns.Add("X");
-            else if (s.Contains("CURRENT_SCHEMA")) { r.Columns.Add("SCHEMA"); r.Rows.Add(new[] { "SCOTT" }); }
+            else if (s.Contains("CURRENT_SCHEMA")) { r.Columns.Add("SCHEMA"); r.Rows.Add(new[] { CurrentSchema }); }
             else if (s.Contains("ALL_ERRORS")) { r.Columns.AddRange(new[] { "TYPE", "LINE", "POSITION", "ATTRIBUTE", "TEXT" }); }
             else if (s.Contains("COUNT(*)")) { r.Columns.Add("COUNT(*)"); r.Rows.Add(new[] { "14" }); }
             else if (s.Contains("FROM ALL_OBJECTS") && s.Contains(" LIKE "))
@@ -135,11 +135,16 @@ namespace PlsqlDevAgent.Harness
         public ExecResult Execute(string sql)
         {
             lock (ExecutedSql) ExecutedSql.Add(sql);
-            // simulated transaction: DML opens one, COMMIT / ROLLBACK / DDL end it, ROLLBACK TO SAVEPOINT keeps it
+            // simulated session state: ALTER SESSION SET CURRENT_SCHEMA = X (plain or "quoted")
+            var schema = System.Text.RegularExpressions.Regex.Match(sql, @"^\s*alter\s+session\s+set\s+current_schema\s*=\s*(?:""(?<q>[^""]+)""|(?<n>[\w$#]+))",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (schema.Success) CurrentSchema = schema.Groups["q"].Success ? schema.Groups["q"].Value : schema.Groups["n"].Value.ToUpperInvariant();
+            // simulated transaction: DML opens one, COMMIT / ROLLBACK / DDL end it (not ALTER SESSION), ROLLBACK TO SAVEPOINT keeps it
             var s = sql.TrimStart().ToUpperInvariant();
             var txn = _transaction;
             if (s.StartsWith("INSERT") || s.StartsWith("UPDATE") || s.StartsWith("DELETE") || s.StartsWith("MERGE")) txn = txn ?? "1.2.3";
-            else if (s.StartsWith("COMMIT") || (s.StartsWith("ROLLBACK") && !s.Contains(" TO ")) || s.StartsWith("CREATE") || s.StartsWith("DROP") || s.StartsWith("ALTER")) txn = null;
+            else if (s.StartsWith("COMMIT") || (s.StartsWith("ROLLBACK") && !s.Contains(" TO ")) || s.StartsWith("CREATE") || s.StartsWith("DROP") ||
+                     (s.StartsWith("ALTER") && !s.StartsWith("ALTER SESSION"))) txn = null;
             if (txn != _transaction) { _transaction = txn; TransactionChanged?.Invoke(); }
             return new ExecResult { ErrorCode = 0, DbmsOutput = "" };
         }
@@ -148,7 +153,11 @@ namespace PlsqlDevAgent.Harness
         private string _transaction;
         public string PendingTransaction => _transaction;
         public event Action TransactionChanged;
-        public bool UsesOwnSession => true;
+        /// <summary>False simulates the agent sharing PL/SQL Developer's main session with the user's windows.</summary>
+        public bool UsesOwnSession { get; set; } = true;
+
+        /// <summary>Current schema of the simulated session (set by ALTER SESSION, or by the "user's windows" in tests).</summary>
+        public volatile string CurrentSchema = "SCOTT";
         public string DatabaseIdentity => "XE|XE|XEPDB1|XEPDB1|mockhost|XE";
         public event Action DatabaseIdentityChanged { add { } remove { } }
 

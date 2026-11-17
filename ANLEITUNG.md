@@ -99,6 +99,8 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
   Er führt kein `COMMIT` aus, wenn Sie es nicht ausdrücklich verlangen. Seine Abfragen laufen im Hintergrund:
   PL/SQL Developer bleibt auch bei langen Abfragen bedienbar. **Stoppen** (Esc) beendet das Warten sofort; eine
   bereits laufende Anweisung kann ein Plug-in aber nicht abbrechen – sie läuft in der Sitzung des Agents zu Ende.
+- Der Agent arbeitet in Ihrem Schema und qualifiziert Objekte anderer Schemas (`HR.EMPLOYEES`). Muss er das Schema
+  der Sitzung doch einmal umstellen, stellt PL/Pilot es am Ende der Anfrage zurück (auch nach **Stoppen**).
 - **Nicht festgeschriebene Änderungen:** Datenänderungen des Agents (INSERT/UPDATE/DELETE) werden nicht automatisch
   festgeschrieben. Solange es welche gibt, erscheint über dem Eingabefeld ein Hinweis mit den Anweisungen und den
   Schaltflächen **Commit** und **Rollback**. Beim Schließen von PL/SQL Developer fragt PL/Pilot, ob sie

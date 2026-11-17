@@ -107,7 +107,10 @@ namespace PlsqlDevAgent.Agent.Tools
                 if (!approval.Approved) return approval.RejectionMessage;
             }
 
-            var res = ctx.Ide.Execute(run);
+            ExecResult res;
+            // utPLSQL runs the tests' PL/SQL in the agent's session: it may change the session (current schema …)
+            try { res = ctx.Ide.Execute(run); }
+            finally { ctx.SessionMayHaveChanged(); }
             var report = (res.DbmsOutput ?? "").Replace("\r\n", "\n").TrimEnd();
             if (!res.Ok)
             {
@@ -141,7 +144,9 @@ namespace PlsqlDevAgent.Agent.Tools
 
             if (coverageRun != null)
             {
-                var cov = ctx.Ide.Execute(coverageRun);
+                ExecResult cov;
+                try { cov = ctx.Ide.Execute(coverageRun); }
+                finally { ctx.SessionMayHaveChanged(); }
                 sb.Append("\n\nCode coverage: ");
                 if (!cov.Ok) sb.Append("failed: ").Append(cov.ErrorMessage.Trim());
                 else sb.Append(CoverageSummary(cov.DbmsOutput) ?? "no coverage data (" + Db.Truncate((cov.DbmsOutput ?? "").Trim(), 500) + ")");

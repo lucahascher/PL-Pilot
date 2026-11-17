@@ -78,6 +78,7 @@ namespace PlsqlDevAgent.Harness
 
                 if (headerLines.Any(l => l.StartsWith("Expect:", StringComparison.OrdinalIgnoreCase))) Interlocked.Increment(ref ExpectContinueRequests);
                 if (body.Contains("Task: PARALLEL research")) await Task.Delay(1500); // a slow model answer for the helpers
+                if (body.Contains("SLOWAFTERTOOL") && body.Contains("tool_call_id")) await Task.Delay(5000); // time to press Stop after a tool call
 
                 await WriteAll(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
                 foreach (var chunk in Script(JObject.Parse(body)))
@@ -120,8 +121,18 @@ namespace PlsqlDevAgent.Harness
                     : Final($"Findings{label}: table EMP is used in EMP_API.list_emps (line 4).");
             }
 
+            // "TOOL: <name> <json>" lines: calls exactly these tools, one per answer in the given order, then answers "Done."
+            var toolLines = System.Text.RegularExpressions.Regex.Matches(request, @"^TOOL: (\S+)[ \t]*(.*?)\s*$", System.Text.RegularExpressions.RegexOptions.Multiline);
+            if (toolLines.Count > 0)
+            {
+                int called = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Count(m => m["tool_calls"] != null);
+                if (called >= toolLines.Count) return Final("Done.");
+                var json = toolLines[called].Groups[2].Value;
+                return ToolCall("tl_" + messages.Count, toolLines[called].Groups[1].Value, json.Length == 0 ? new JObject() : JObject.Parse(json));
+            }
+
             // "EXECSQL: <statement>": runs exactly that statement with execute_sql
-            var exec = System.Text.RegularExpressions.Regex.Match(request, @"EXECSQL: (.+?)\s*$", System.Text.RegularExpressions.RegexOptions.Multiline);
+            var exec =System.Text.RegularExpressions.Regex.Match(request, @"EXECSQL: (.+?)\s*$", System.Text.RegularExpressions.RegexOptions.Multiline);
             if (exec.Success)
             {
                 bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);

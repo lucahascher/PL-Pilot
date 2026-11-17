@@ -736,7 +736,8 @@ namespace PlsqlDevAgent.Agent.Tools
         public override string Description =>
             "Executes ONE SQL statement or anonymous PL/SQL block (DML, DDL, BEGIN…END) in the agent's database session. " +
             "The user must approve it. DBMS_OUTPUT is returned. DML is not committed unless you execute COMMIT (only " +
-            "do that if the user asked). For CREATE OR REPLACE of PL/SQL units prefer compile_plsql.";
+            "do that if the user asked). For CREATE OR REPLACE of PL/SQL units prefer compile_plsql. The session is in the " +
+            "user's schema: for objects of other schemas qualify the names (OWNER.NAME) instead of ALTER SESSION SET CURRENT_SCHEMA.";
         public override JObject Parameters => Schema(
             Req("sql", "string", "The statement or PL/SQL block."),
             Opt("purpose", "string", "Short explanation shown to the user in the approval dialog."));
@@ -783,6 +784,25 @@ namespace PlsqlDevAgent.Agent.Tools
                 if (!approval.Approved) return approval.RejectionMessage;
             }
 
+            bool mayChangeSession = (returnsRows && !readOnlyQuery) || MayChangeSession(sql, kw);
+            try
+            {
+                return Execute(ctx, sql, kw, returnsRows, readOnlyQuery);
+            }
+            finally
+            {
+                // also after an error or Stop: the statement may have switched the schema before it failed, or still runs
+                if (mayChangeSession) ctx.SessionMayHaveChanged();
+            }
+        }
+
+        /// <summary>ALTER SESSION, SET ROLE, PL/SQL blocks and CALL can change the session (current schema, roles …).</summary>
+        internal static bool MayChangeSession(string sql, string kw) =>
+            kw == "BEGIN" || kw == "DECLARE" || kw == "CALL" || kw == "SET" ||
+            (kw == "ALTER" && Regex.IsMatch(StripLeadingComments(sql), @"^ALTER\s+SESSION\b", RegexOptions.IgnoreCase));
+
+        private static string Execute(ToolContext ctx, string sql, string kw, bool returnsRows, bool readOnlyQuery)
+        {
             if (returnsRows)
             {
                 var r = ctx.Ide.Query(sql, Math.Min(50, ctx.Config.MaxQueryRows));

@@ -321,7 +321,79 @@ namespace PlsqlDevAgent.Agent
             return true;
         }
 
+        /// <summary>The schema the user works in: the session's schema when the current request started.</summary>
+        private string _userSchema;
+
+        /// <summary>
+        /// One user request. The agent starts in the schema the user works in; if something it ran may have switched
+        /// the session to another schema, the session is switched back at the end, also after an error or Stop.
+        /// </summary>
         private async Task RunAsync(string userText, bool planMode, CancellationToken ct)
+        {
+            // without a session of its own the agent shares the session of the user's windows: they may have switched its schema
+            if (!_ide.UsesOwnSession) _ctx.ResetSchemaCache();
+            _userSchema = null; // read for the context block of the request
+            int changes = _ctx.SessionChanges, generation = DatabaseGeneration;
+            try
+            {
+                await RunTurnsAsync(userText, planMode, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                ReturnToUserSchema(_userSchema, changes, generation, ct.IsCancellationRequested);
+            }
+        }
+
+        private int DatabaseGeneration { get { lock (_databaseLock) return _databaseGeneration; } }
+
+        /// <summary>
+        /// Switches the session back to <paramref name="schema"/> if a statement of this run may have changed it
+        /// (execute_sql with ALTER SESSION or PL/SQL, unit tests). After Stop that statement may still be running: the
+        /// switch then waits for it in the background, as one statement, so a new request cannot read the schema
+        /// in between (the session runs statements strictly one after another).
+        /// </summary>
+        private void ReturnToUserSchema(string schema, int changesAtStart, int generation, bool stopped)
+        {
+            if (string.IsNullOrEmpty(schema) || _ctx.SessionChanges == changesAtStart) return;
+            if (stopped)
+            {
+                Task.Run(() =>
+                {
+                    IdeCancellation.Current = CancellationToken.None; // the request was stopped, switching back is not
+                    SwitchBackToSchema(schema, generation, checkFirst: false);
+                });
+                return;
+            }
+            var previous = IdeCancellation.Current;
+            IdeCancellation.Current = CancellationToken.None; // a Stop click now must not leave the session in the other schema
+            try { SwitchBackToSchema(schema, generation, checkFirst: true); }
+            finally { IdeCancellation.Current = previous; }
+        }
+
+        private void SwitchBackToSchema(string schema, int generation, bool checkFirst)
+        {
+            try
+            {
+                if (generation != DatabaseGeneration) return; // another connection or session: it starts in the user's schema
+                var current = checkFirst ? _ctx.QueryCurrentSchema() : null;
+                if (current == schema) return;
+                var res = _ide.Execute("alter session set current_schema = \"" + schema.Replace("\"", "") + "\"");
+                _ctx.ResetSchemaCache();
+                if (!res.Ok)
+                {
+                    Log.Warn($"Could not switch the session back to schema {schema}: {res.ErrorMessage}");
+                    _ui.Error(L.T("Could not switch the session back to schema {0}, the schema you work in: {1}", schema, (res.ErrorMessage ?? "").Trim()));
+                    return;
+                }
+                Log.Info($"Session switched back to the user's schema {schema}" + (current != null ? $" (was {current})" : " (after Stop)"));
+                if (current == null) return;
+                _ui.Notice(L.T("Switched the session back from schema {0} to {1}, the schema you work in.", current, schema));
+                _notes.Enqueue($"At the end of your last turn the plug-in switched the session back from schema {current} to the user's schema {schema}.");
+            }
+            catch (Exception ex) { Log.Warn($"Switching the session back to schema {schema} failed: {ex.Message}"); }
+        }
+
+        private async Task RunTurnsAsync(string userText, bool planMode, CancellationToken ct)
         {
             var guard = CurrentGuard();
             var tools = AvailableTools(guard, planMode);
@@ -333,7 +405,8 @@ namespace PlsqlDevAgent.Agent
             try
             {
                 var ideCtx = _ide.GetContext();
-                contextBlock = SystemPrompt.ContextBlock(ideCtx, ideCtx.Connected ? _ctx.CurrentSchema : null, guard, notes, planMode);
+                _userSchema = ideCtx.Connected ? _ctx.CurrentSchema : null;
+                contextBlock = SystemPrompt.ContextBlock(ideCtx, _userSchema, guard, notes, planMode);
             }
             catch (Exception ex)
             {
@@ -484,11 +557,8 @@ namespace PlsqlDevAgent.Agent
                 .Where(t => !t.NeedsWorkspace || Config.HasWorkspace)
                 .ToList();
             var schemas = new JArray(tools.Select(t => t.ToOpenAiTool()));
-            var subCtx = new ToolContext
-            {
-                Ide = _ide, Config = Config, Guard = CurrentGuard, Cancellation = ct,
-                RequestApproval = r => Task.FromResult(new ApprovalResult { Approved = false, Feedback = "Helper agents are read-only." }),
-            };
+            // shares the schema cache with the agent and the other helpers that run in parallel
+            var subCtx = _ctx.ForHelper(ct, r => Task.FromResult(new ApprovalResult { Approved = false, Feedback = "Helper agents are read-only." }));
             string context = "";
             try
             {
@@ -540,6 +610,7 @@ namespace PlsqlDevAgent.Agent
                         string summary = "";
                         try { summary = tool?.Summarize(args) ?? ""; } catch { }
                         _ui.SubtaskStep(parentCallId, $"{call.Name} {summary}".Trim());
+                        if (!_ide.UsesOwnSession) subCtx.ResetSchemaCache(); // the user's windows may have switched the shared session's schema
                         result = tool == null
                             ? $"Error: unknown tool '{call.Name}'."
                             : await Task.Run(() => tool.ExecuteAsync(args, subCtx)).ConfigureAwait(false);
@@ -605,6 +676,7 @@ namespace PlsqlDevAgent.Agent
             var callCtx = _ctx.ForCall(call.Id);
             callCtx.RequestApproval = r => ApproveAsync(r, call.Id);
             callCtx.RunSubtask = task => RunSubtaskAsync(task, call.Id, callCtx.Cancellation);
+            if (!_ide.UsesOwnSession) callCtx.ResetSchemaCache(); // the user's windows share the session and may have switched the schema
             try
             {
                 result = await Task.Run(() => tool.ExecuteAsync(args, callCtx)).ConfigureAwait(false);

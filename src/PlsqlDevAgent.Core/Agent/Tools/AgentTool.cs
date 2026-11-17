@@ -180,33 +180,58 @@ namespace PlsqlDevAgent.Agent.Tools
             else UiMeta[key] = value is JObject ? new JArray(value) : value;
         }
 
-        /// <summary>Shared by the copies made with <see cref="ForCall"/>.</summary>
-        private sealed class SchemaCache { public volatile string Value; }
+        /// <summary>
+        /// Shared by the copies made with <see cref="ForCall"/> and <see cref="ForHelper"/>, which may run in parallel
+        /// (helper agents): lock-free, a reset only means that the next reader asks the database again.
+        /// </summary>
+        private sealed class SchemaCache
+        {
+            public volatile string Value;
+            public int SessionChanges;
+        }
         private SchemaCache _schema = new SchemaCache();
 
-        /// <summary>Current schema of the agent's database session (cached until reset).</summary>
+        /// <summary>Current schema of the agent's database session (remembered until reset).</summary>
         public string CurrentSchema
         {
             get
             {
                 var cached = _schema.Value;
                 if (cached != null) return cached;
-                try
-                {
-                    var r = Ide.Query("select sys_context('USERENV','CURRENT_SCHEMA') from dual", 1);
-                    cached = r.Rows.Count > 0 ? r.Rows[0][0] : "";
-                }
-                catch (OperationCanceledException) { throw; }
-                catch
-                {
-                    cached = (Ide.GetContext().User ?? "").ToUpperInvariant();
-                }
+                cached = QueryCurrentSchema() ?? (Ide.GetContext().User ?? "").ToUpperInvariant();
                 _schema.Value = cached;
                 return cached;
             }
         }
 
+        /// <summary>The current schema read from the session now (not remembered); null if it cannot be read.</summary>
+        public string QueryCurrentSchema()
+        {
+            try
+            {
+                var r = Ide.Query("select sys_context('USERENV','CURRENT_SCHEMA') from dual", 1);
+                return r.Rows.Count > 0 && !string.IsNullOrEmpty(r.Rows[0][0]) ? r.Rows[0][0] : null;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { return null; }
+        }
+
+        /// <summary>Forgets the remembered schema: the next <see cref="CurrentSchema"/> reads it from the session.</summary>
         public void ResetSchemaCache() => _schema.Value = null;
+
+        /// <summary>
+        /// A statement may have changed the state of the session (ALTER SESSION, SET ROLE, a PL/SQL block, CALL, a
+        /// query with PL/SQL): the schema is read again, and the change is counted, so that the agent session switches
+        /// back to the user's schema at the end of the run (<see cref="SessionChanges"/>).
+        /// </summary>
+        public void SessionMayHaveChanged()
+        {
+            Interlocked.Increment(ref _schema.SessionChanges);
+            ResetSchemaCache();
+        }
+
+        /// <summary>How often <see cref="SessionMayHaveChanged"/> was called (in this context and its copies).</summary>
+        public int SessionChanges => Volatile.Read(ref _schema.SessionChanges);
 
         /// <summary>
         /// A copy for one tool call with its own <see cref="UiMeta"/> (tool calls may run in parallel, e.g. helper
@@ -217,6 +242,22 @@ namespace PlsqlDevAgent.Agent.Tools
             var copy = (ToolContext)MemberwiseClone();
             copy.UiMeta = null;
             copy.CallId = callId;
+            return copy;
+        }
+
+        /// <summary>
+        /// A context for a helper agent (run_subtask): its own approvals, nothing recorded for rewinding, no task list
+        /// and no further helpers. It shares the schema cache, so helpers that run in parallel do not each ask the
+        /// database (their statements queue up in the one agent session), and it keeps plan mode and the guard.
+        /// </summary>
+        public ToolContext ForHelper(CancellationToken ct, Func<ApprovalRequest, Task<ApprovalResult>> requestApproval)
+        {
+            var copy = ForCall(CallId);
+            copy.Cancellation = ct;
+            copy.RequestApproval = requestApproval;
+            copy.RecordChange = null;
+            copy.SetTasks = null;
+            copy.RunSubtask = null;
             return copy;
         }
 

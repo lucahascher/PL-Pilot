@@ -1106,6 +1106,7 @@ namespace PlsqlDevAgent.UI
             {
                 p.UseSeparateSession = _config.SeparateSession;
                 p.ResetSession();
+                _session?.OnConnectionChanged(); // another session: forget its schema and database facts (null in the constructor)
             }
         }
 

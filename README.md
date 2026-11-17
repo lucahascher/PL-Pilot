@@ -168,7 +168,8 @@ state; you can unlock a protected connection — or lock any other one — for t
 **Your session stays yours.** The agent works in its own database session, so it never touches your
 transaction; its queries run on a background thread, so PL/SQL Developer stays responsive. Its
 uncommitted changes are listed above the input with **Commit** / **Rollback**, and closing PL/SQL
-Developer asks what to do with them.
+Developer asks what to do with them. The agent works in your schema and qualifies objects of other schemas;
+if it has to switch the session's schema, it is switched back at the end of the request (also after *Stop*).
 
 **Undo.** Before a PL/SQL unit or view is replaced or dropped, its current source is backed up
 (*Restore previous*). Every editor or file edit has a *Revert* button. **Rewind** on a user message (or

@@ -638,7 +638,11 @@ namespace PlsqlDevAgent.Testing
                 if (securityOnly) await SecurityChecks(plugin.Ide, AgentConfig.Load());
                 else if (transactionOnly) await TransactionChecks(plugin.Ide, AgentConfig.Load());
                 else if (rewindOnly) await RewindChecks(plugin.Ide, AgentConfig.Load());
-                else await SqlThreadChecks(plugin.Ide, AgentConfig.Load());
+                else
+                {
+                    await SqlThreadChecks(plugin.Ide, AgentConfig.Load());
+                    await SchemaChecks(plugin.Ide, AgentConfig.Load());
+                }
                 Line($"\n**Total: {_pass} passed, {_fail} failed**");
             }
             catch (Exception ex) { Line("FATAL: " + ex); }
@@ -873,6 +877,38 @@ namespace PlsqlDevAgent.Testing
             Line("Guard: " + protectedState.Describe());
             Check($"guard: the pattern '{dbName}' (database name) protects {c.ConnectionLabel}",
                 dbName.Length > 0 && protectedState.Mode == GuardMode.Protected && new ConnectionGuard().Evaluate(gcfg, c).Mode == GuardMode.Normal);
+        }
+
+        /// <summary>
+        /// The agent's current schema: a switch with execute_sql (ALTER SESSION, or a PL/SQL block) is seen at once
+        /// instead of the remembered schema and counted, so the agent session switches back at the end of a request.
+        /// </summary>
+        private static async Task SchemaChecks(IIde ide, AgentConfig cfg)
+        {
+            Line("\n## 8b. Current schema");
+            var ctx = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+            var home = await Task.Run(() => ctx.CurrentSchema);
+            Line("Schema at the start: " + home);
+            try
+            {
+                await Tool(ctx, "get_ide_context", new JObject(), $"(current schema {home})");
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = "select count(*) from user_objects" }, "COUNT(*)");
+                Check("a plain query does not count as a session change", ctx.SessionChanges == 0);
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = "alter session set current_schema = SYSTEM" }, "Executed successfully");
+                await Tool(ctx, "get_ide_context", new JObject(), "(current schema SYSTEM)");
+                var lookups = await Task.Run(() => ctx.CurrentSchema);
+                Check($"ALTER SESSION counts as a session change; unqualified lookups now use {lookups}", ctx.SessionChanges == 1 && lookups == "SYSTEM");
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = $"begin\n  execute immediate 'alter session set current_schema = \"{home}\"';\nend;" }, "Executed successfully");
+                await Tool(ctx, "get_ide_context", new JObject(), $"(current schema {home})");
+                Check("a PL/SQL block counts as a session change", ctx.SessionChanges == 2);
+            }
+            finally
+            {
+                // never leave the session in the other schema
+                var now = await Task.Run(() => ctx.QueryCurrentSchema());
+                if (now != home) await Task.Run(() => ide.Execute($"alter session set current_schema = \"{home}\""));
+                Check("the session is back in schema " + home, await Task.Run(() => ctx.QueryCurrentSchema()) == home);
+            }
         }
 
         /// <summary>A statement that runs <paramref name="seconds"/> seconds in the database.</summary>

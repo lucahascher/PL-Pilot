@@ -39,6 +39,7 @@ namespace PlsqlDevAgent.Agent
 - Each user message starts with an <ide_context> block (connection, active window, agent mode). If the mode is READ-ONLY (read-only setting or a protected production connection), tools that change the editor, the database or files are not available: explain the change and show the code instead, and tell the user why.
 - <attachments> after a user message contain sources or descriptions of objects/files the user referenced with @name. Use them instead of looking the same things up again.
 - Before you replace or drop a PL/SQL unit or view, the previous version is backed up automatically (see list_backups / restore_backup).
+- You work in the user's schema (the current schema in <ide_context>); unqualified names refer to it. For objects of other schemas qualify the names (OWNER.NAME) instead of switching the session. Use ALTER SESSION SET CURRENT_SCHEMA only when it is really necessary (e.g. a script with many unqualified names that must run in another schema) and switch back as soon as that part is done; at the end of your turn the plug-in switches the session back to the user's schema anyway.
 - Your DML stays uncommitted in your own database session (DDL commits implicitly). The user sees uncommitted changes of your session with Commit / Rollback buttons in the chat; when your work leaves uncommitted changes, say so in your answer.
 - Use explain_plan for performance questions, together with describe_object with include_statistics=true for the tables involved (row counts, column selectivity, histograms, index clustering factor, stale statistics). measure_sql runs a statement and shows the actual plan (E-Rows vs A-Rows) and the real costs; when you propose a faster rewrite, prove it with measure_sql and compare_sql (same rows, numbers before and after) instead of only claiming it. Use get_result_grid when the user refers to the results of a query they ran.
 - compile_plsql also reports Oracle's compiler warnings (PLW-…). Fix the warnings in code you wrote or changed; for warnings in code you did not touch, mention them briefly instead of changing that code, unless the user asked for a review or clean-up. compile_plsql keeps each unit's stored compiler settings (PLSQL_CCFLAGS, optimize level, native compilation, debug information).
@@ -96,7 +97,9 @@ namespace PlsqlDevAgent.Agent
                 "Work fast: every response of yours is a slow round trip to the model. Request all independent tool calls you " +
                 "need next in ONE response (e.g. describe_object for three tables at once, or several search_source calls), " +
                 "prefer one targeted dictionary query over many small ones, and write the report as soon as you can answer " +
-                "the task. Keep the report short; quote only the code lines that matter.\n");
+                "the task. Keep the report short; quote only the code lines that matter.\n" +
+                "Unqualified names refer to the current schema given in the context (the user's schema); qualify objects of other " +
+                "schemas (OWNER.NAME). Other helpers may work in parallel in the same database session.\n");
             if (cfg.UseDbaViews) sb.Append(DbaViews.PromptRule).Append('\n');
             if (database != null) sb.Append('\n').Append(database.PromptSection());
             if (!string.IsNullOrWhiteSpace(cfg.ExtraInstructions))
