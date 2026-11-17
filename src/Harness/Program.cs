@@ -472,7 +472,8 @@ namespace PlsqlDevAgent.Harness
             await Js("document.getElementById('lnkAbout').click()");
             await Task.Delay(400);
             var about = await Js("document.querySelector('#about .about-card').innerText");
-            Check("about card via settings shows the credit and version", about.Contains("Created by Luca Hascher") && about.Contains("Version 0.1.0"));
+            var version = typeof(ChatForm).Assembly.GetName().Version.ToString(3);
+            Check($"about card via settings shows the credit and version {version}", about.Contains("Created by Luca Hascher") && about.Contains("Version " + version));
             await ScreenshotAsync(_chat, Path.Combine(_autoTestDir, "about.png"));
             await Js("document.getElementById('btnCloseAbout').click(); document.getElementById('btnCancelSettings').click(); document.getElementById('btnNew').click();");
             await Task.Delay(500);
