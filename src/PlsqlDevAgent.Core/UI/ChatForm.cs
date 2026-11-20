@@ -15,6 +15,7 @@ using Microsoft.Web.WebView2.WinForms;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PlsqlDevAgent.Agent;
+using PlsqlDevAgent.Agent.Mcp;
 using PlsqlDevAgent.Agent.Tools;
 using PlsqlDevAgent.Ide;
 using PlsqlDevAgent.Native;
@@ -60,6 +61,7 @@ namespace PlsqlDevAgent.UI
             ApplyIdeSettings();
             _session = new AgentSession(ide, this, _config);
             _session.Journal = ChangeJournal.For(_chatId);
+            _session.Mcp.Changed += OnMcpChanged;
             _ide.TransactionChanged += OnTransactionChanged;
             _ide.DatabaseIdentityChanged += OnDatabaseIdentityChanged;
 
@@ -530,7 +532,7 @@ namespace PlsqlDevAgent.UI
                         DatabaseInfo database = null;
                         try { database = _session.Database(); }
                         catch (Exception ex) { Log.Warn("Prompt preview without database facts: " + ex.Message); }
-                        var text = SystemPrompt.Build(previewCfg, previewCfg.HasWorkspace, database);
+                        var text = SystemPrompt.Build(previewCfg, previewCfg.HasWorkspace, database, _session.McpPromptSection);
                         Post(new JObject { ["type"] = "prompt_preview", ["text"] = text, ["chars"] = text.Length, ["tokens"] = (int)(text.Length / 3.5) }, false);
                     });
                     break;
@@ -545,6 +547,39 @@ namespace PlsqlDevAgent.UI
 
                 case "test_connection":
                     TestConnection((JObject)msg["config"]);
+                    break;
+
+                case "mcp_test":
+                    TestMcpServer((string)msg["uid"], (JObject)msg["server"], (JObject)msg["config"]);
+                    break;
+
+                case "mcp_status":
+                    Post(new JObject { ["type"] = "mcp_status", ["servers"] = _session.Mcp.StatusJson() }, false);
+                    break;
+
+                case "mcp_team":
+                    PostMcpTeam((string)msg["path"]);
+                    break;
+
+                case "browse_mcp_config":
+                    var currentMcp = (string)msg["current"];
+                    MainThread.Post(() =>
+                    {
+                        var start = McpTeamConfig.ConfiguredFile(currentMcp);
+                        using (var dlg = new OpenFileDialog
+                        {
+                            Title = L.T("Team MCP configuration (mcp.json)"),
+                            Filter = "JSON (*.json)|*.json|All files (*.*)|*.*",
+                            FileName = start.Length > 0 ? start : McpTeamConfig.FileName,
+                        })
+                        {
+                            if (dlg.ShowDialog(this) == DialogResult.OK)
+                            {
+                                Post(new JObject { ["type"] = "mcp_config_path", ["path"] = dlg.FileName }, false);
+                                PostMcpTeam(dlg.FileName);
+                            }
+                        }
+                    });
                     break;
 
                 case "browse_folder":
@@ -571,14 +606,25 @@ namespace PlsqlDevAgent.UI
                 return;
             }
             RememberPrompt(text);
-            var cmd = Commands.Find(text, _config, out var args);
+            var cmd = Commands.Find(text, _config, out var args, _session.Mcp.PromptCommands());
             if (cmd != null && cmd.Kind == "action") { HandleAction(cmd.Name); return; }
 
-            var llmText = cmd != null ? Commands.Expand(cmd, args) : text;
+            // the prompt of an MCP server is filled in by the server first (in the background, the agent shows busy);
+            // "/server:prompt" of a configured server that is still connecting waits for it
+            Func<CancellationToken, Task<string>> expand = null;
+            var mcpCommand = System.Text.RegularExpressions.Regex.Match(text, @"^\s*/(([\w-]+):[\w.-]+)(?:\s+([\s\S]*))?$");
+            if ((cmd != null && cmd.Kind == "mcp") || (cmd == null && mcpCommand.Success && _session.Mcp.IsServer(mcpCommand.Groups[2].Value)))
+            {
+                var name = mcpCommand.Groups[1].Value;
+                var mcpArgs = mcpCommand.Groups[3].Success ? mcpCommand.Groups[3].Value.Trim() : "";
+                expand = ct => _session.Mcp.ExpandPromptCommandAsync(name, mcpArgs, ct);
+                cmd = null;
+            }
+            var llmText = cmd != null && expand == null ? Commands.Expand(cmd, args) : text;
             var checkpoint = "c" + Guid.NewGuid().ToString("N").Substring(0, 10);
             var userEvent = new JObject { ["type"] = "user", ["text"] = text, ["mode"] = planMode ? "plan" : "agent", ["checkpoint"] = checkpoint };
             Record(userEvent); // before Send: the run starts immediately and records its own events
-            if (!_session.Send(llmText, planMode, checkpoint))
+            if (!_session.Send(llmText, planMode, checkpoint, expand))
             {
                 lock (_eventsLock) _events.Remove(_events.LastOrDefault(e => (string)e["type"] == "user" && (string)e["text"] == text));
                 Post(new JObject { ["type"] = "notice", ["text"] = L.T("The agent is still working. Stop it first or wait.") }, false);
@@ -600,16 +646,45 @@ namespace PlsqlDevAgent.UI
                     break;
                 case "help":
                     var sb = new StringBuilder(L.T("**Commands** (type `/` in the input box):") + "\n\n");
-                    foreach (var c in Commands.All(_config))
-                        sb.Append($"- `/{c.Name}`: {L.T(c.Description ?? "")}{(c.Source != "built-in" ? $" _({c.Source})_" : "")}\n");
+                    foreach (var c in AllCommands())
+                        sb.Append($"- `/{c.Name}`: {(c.Kind == "mcp" ? c.Description : L.T(c.Description ?? ""))}{(c.Source != "built-in" ? $" _({c.Source})_" : "")}\n");
                     sb.Append("\n").Append(L.T("Own commands: Settings → Custom commands, or `.plsqlagent/commands/<name>.md` in the project folder. Mention objects or files with `@NAME` to attach their source."));
+                    if (_session.Mcp.PromptCommands().Count > 0 || _session.Mcp.StatusJson().Any(s => (int?)s["resources"] > 0 || (s["templates"] as JArray)?.Count > 0))
+                        sb.Append(" ").Append(L.T("Commands named `/server:prompt` are prompts of your MCP servers; `@server:name` attaches a resource of an MCP server."));
                     Post(new JObject { ["type"] = "info", ["markdown"] = sb.ToString() });
                     break;
             }
         }
 
+        /// <summary>Built-in and own commands plus the prompts of the connected MCP servers.</summary>
+        private List<ChatCommand> AllCommands() => Commands.All(_config, _session.Mcp.PromptCommands());
+
         private JArray CommandsJson() =>
-            new JArray(Commands.All(_config).Select(c => new JObject { ["name"] = c.Name, ["description"] = L.T(c.Description ?? ""), ["kind"] = c.Kind }));
+            new JArray(AllCommands().Select(c => new JObject { ["name"] = c.Name, ["description"] = c.Kind == "mcp" ? c.Description : L.T(c.Description ?? ""), ["kind"] = c.Kind }));
+
+        /// <summary>MCP servers connected or lost: new slash commands; the settings page shows the state.</summary>
+        private void OnMcpChanged()
+        {
+            if (!_ready) return;
+            Post(new JObject { ["type"] = "commands", ["items"] = CommandsJson() }, false);
+            Post(new JObject { ["type"] = "mcp_status", ["servers"] = _session.Mcp.StatusJson() }, false);
+        }
+
+        /// <summary>The servers of the team MCP configuration for the settings page (read in the background: network share).</summary>
+        private void PostMcpTeam(string configuredPath)
+        {
+            var cfg = _config.Clone();
+            cfg.McpConfigPath = configuredPath ?? "";
+            Task.Run(() =>
+            {
+                JObject team;
+                try { team = McpTeamConfig.ToUiJson(McpTeamConfig.Load(cfg)); }
+                catch (Exception ex) { team = new JObject { ["servers"] = new JArray(), ["info"] = ex.Message }; }
+                team["type"] = "mcp_team";
+                Post(team, false);
+                Post(new JObject { ["type"] = "mcp_status", ["servers"] = _session.Mcp.StatusJson() }, false);
+            });
+        }
 
         private void RememberPrompt(string text) => PromptHistory.Remember(text, _config);
 
@@ -1013,6 +1088,15 @@ namespace PlsqlDevAgent.UI
                 try { JObject.Parse(cfg.ExtraBodyJson); }
                 catch (Exception ex) { Post(new JObject { ["type"] = "settings_error", ["text"] = L.T("Extra request JSON is invalid: {0}", ex.Message) }, false); return; }
             }
+            var mcpError = cfg.McpServers.Select(s => s.Validate()).FirstOrDefault(e => e != null)
+                ?? cfg.McpServers.GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1)
+                      .Select(g => L.T("Two MCP servers are named {0}: the names must be different.", g.Key)).FirstOrDefault();
+            if (mcpError != null)
+            {
+                Post(new JObject { ["type"] = "settings_error", ["text"] = mcpError, ["section"] = "mcp" }, false);
+                return;
+            }
+            foreach (var s in cfg.McpServers) s.TimeoutSeconds = Math.Max(10, Math.Min(3600, s.TimeoutSeconds));
             cfg.MaxSteps = Math.Max(1, cfg.MaxSteps);
             cfg.MaxQueryRows = Math.Max(1, cfg.MaxQueryRows);
             cfg.RequestTimeoutSeconds = Math.Max(30, cfg.RequestTimeoutSeconds);
@@ -1029,6 +1113,8 @@ namespace PlsqlDevAgent.UI
             Task.Run(() => LocalData.Cleanup(cfg));
             if (historySwitchedOff)
                 Post(new JObject { ["type"] = "notice", ["text"] = L.T("Chat history is off: saved chats and the prompt history are deleted and nothing is saved any more.") }, false);
+            if (cfg.AutoApproveSql && (cfg.McpServers.Any(s => s.Enabled) || !string.IsNullOrWhiteSpace(cfg.McpConfigPath) || File.Exists(McpTeamConfig.PluginFile)))
+                Post(new JObject { ["type"] = "notice", ["text"] = L.T("Note: \"Auto approve SQL\" is on and MCP servers are connected. Text from external systems (e.g. a ticket) could make the agent run SQL without asking you. Consider turning auto approve off.") }, false);
             _session.UpdateConfig(cfg);
             ApplyIdeSettings();
             Plugin.ApplyLanguage(_ide, cfg);
@@ -1062,6 +1148,45 @@ namespace PlsqlDevAgent.UI
                 {
                     var message = ex is TaskCanceledException ? L.T("Timed out after 20 s.") : ex.GetBaseException().Message;
                     Post(new JObject { ["type"] = "test_result", ["ok"] = false, ["error"] = message }, false);
+                }
+            });
+        }
+
+        /// <summary>Test of one MCP server in the settings (a temporary connection; the session's connections are not touched).</summary>
+        private void TestMcpServer(string uid, JObject serverUi, JObject configUi)
+        {
+            var cfg = _config.Clone();
+            if (configUi != null) cfg.UpdateFromUi(configUi); // proxy and trusted certificates as currently shown
+            var server = McpServerConfig.FromUiJson(serverUi ?? new JObject());
+            if (string.IsNullOrWhiteSpace(server.Name)) server.Name = "test";
+            var invalid = server.Validate();
+            if (invalid != null)
+            {
+                Post(new JObject { ["type"] = "mcp_test_result", ["uid"] = uid, ["ok"] = false, ["error"] = invalid }, false);
+                return;
+            }
+            Task.Run(async () =>
+            {
+                try
+                {
+                    // as the session would connect: a team server with its URL and headers from the team file, ${env:…} replaced
+                    var only = cfg.Clone();
+                    only.McpServers = new List<McpServerConfig> { server };
+                    var team = server.Team ? McpTeamConfig.Load(only) : new McpTeamConfig.LoadResult();
+                    server = McpTeamConfig.Effective(only, team).FirstOrDefault(s => s.Name.Equals(server.Name, StringComparison.OrdinalIgnoreCase))
+                             ?? throw new McpException(L.T("{0} is not in the team MCP configuration any more.", server.Name));
+                    JObject info;
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45)))
+                        info = await McpManager.TestAsync(server, cfg.UseSystemProxy, cfg.TrustedCertificates, cts.Token);
+                    info["type"] = "mcp_test_result";
+                    info["uid"] = uid;
+                    info["ok"] = true;
+                    Post(info, false);
+                }
+                catch (Exception ex)
+                {
+                    var message = ex is OperationCanceledException ? L.T("Timed out after 45 s.") : ex.GetBaseException().Message;
+                    Post(new JObject { ["type"] = "mcp_test_result", ["uid"] = uid, ["ok"] = false, ["error"] = message }, false);
                 }
             });
         }
@@ -1127,6 +1252,7 @@ namespace PlsqlDevAgent.UI
         private void PostSettings()
         {
             Post(new JObject { ["type"] = "settings", ["config"] = _config.ToUiJson(), ["defaultPrompt"] = SystemPrompt.DefaultBasePrompt }, false);
+            PostMcpTeam(_config.McpConfigPath); // then the state of the servers
             PostRulesInfo(_config.CompanyRulesPath);
         }
 

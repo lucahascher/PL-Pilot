@@ -61,6 +61,9 @@ It was written for locked-down company PCs: it installs **without administrator 
   destructive statements always ask, PL/SQL units are backed up before they are replaced.
 - **Handles real tasks.** Task list for multi-step work, Plan mode (investigate first, then execute),
   parallel helper agents for broad research, automatic context compaction for long sessions.
+- **Reaches your other systems.** Connect MCP servers over HTTP — e.g. the ticket system or version
+  control — and the agent reads the ticket and the commit history before it goes into the packages. Tools
+  that change something there ask first, like every other change.
 - **Fits company rules.** Shared team rules (e.g. naming conventions on a network share), `AGENTS.md`
   per project, an option to query `DBA_` instead of `ALL_` dictionary views, HTTPS with the Windows
   certificate store, no telemetry, configurable local data retention.
@@ -120,10 +123,15 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 - **Ask about code:** select code and use *Ask about Selection*, or right-click in an editor → *Ask PL/Pilot*;
   right-click an object in the Object Browser → *Ask PL/Pilot about this object*.
 - **Commands:** type `/` — `/explain`, `/review`, `/document`, `/test`, `/optimize`, `/fix`, `/compact`,
-  `/new`, `/help`, plus your own (`/name = prompt` in the settings or `.plsqlagent/commands/<name>.md`).
-- **Attach context:** `@EMP_API`, `@SCOTT.EMP`, `@scripts/deploy.sql` attach source, table descriptions or files.
+  `/new`, `/help`, plus your own (`/name = prompt` in the settings or `.plsqlagent/commands/<name>.md`) and the
+  prompts of your MCP servers as `/server:prompt arguments` (values in order — the last one takes the rest — or
+  `name=value`; the server fills in the prompt, which becomes your message).
+- **Attach context:** `@EMP_API`, `@SCOTT.EMP`, `@scripts/deploy.sql` attach source, table descriptions or files;
+  `@server:name` attaches a resource of an MCP server — by its name, its URI, or a value for a resource template
+  (`@tickets:ticket/PLS-101`, or just `@tickets:PLS-101` if the server has one template).
   While you type after `@`, matching objects are looked up in the database; turn this off with the setting
-  *Suggest Objects After @* (the mention still works when you send the message).
+  *Suggest Objects After @* (the mention still works when you send the message). MCP resources are suggested
+  from the server's list without any lookup.
 - **Agent / Plan mode:** in *Plan* mode the agent only investigates and proposes a plan; *Execute plan*
   then carries it out.
 - **Longer tasks:** the agent keeps a task list above the input and continues by itself while tasks are
@@ -145,6 +153,7 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 | Database (read) | `run_query`, `list_objects`, `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `measure_sql`¹, `find_dependencies`, `resolve_error_stack`, `list_backups` |
 | Database (change, with approval) | `compile_plsql`, `execute_sql`, `recompile_invalid`, `run_unit_tests`, `restore_backup` |
 | Project folder (optional) | `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `open_file_in_ide` |
+| External systems (optional) | the tools of your MCP servers, named `<server>__<tool>`, e.g. `tickets__get_ticket` |
 
 ¹ Queries only read. INSERT / UPDATE / DELETE / MERGE are measured only with your approval and rolled back
 afterwards; not in plan mode or on protected connections.
@@ -168,7 +177,14 @@ events (e.g. logon), and writes to git/IDE/agent configuration or script files.
 The patterns are matched against the logon text and the database's own names (database, service,
 container, host), so an alias or IP address does not get around it. A badge in the chat header shows the
 state; you can unlock a protected connection — or lock any other one — for the current session.
-*Plan* mode and the *Read-only* setting remove all changing tools as well.
+*Plan* mode and the *Read-only* setting remove all changing tools as well — including MCP tools that change
+data in an external system.
+
+**External systems (MCP).** Read tools of an MCP server run without asking; tools that change data there ask
+first (with the arguments shown), and tools the server marks as destructive always ask. You decide per tool
+(*Read*, *Changes data*, *Off*). What the external system returns — ticket texts, comments, commit messages —
+is passed to the model as data in an `<external_data>` block, with the rule never to follow instructions found
+in it; your approvals for database changes stay in force whatever a ticket says.
 
 **Your session stays yours.** The agent works in its own database session, so it never touches your
 transaction; its queries run on a background thread, so PL/SQL Developer stays responsive. Its
@@ -193,6 +209,8 @@ database account. See [SECURITY.md](SECURITY.md) for the full model and how to r
 
 - Prompts, code and query results are sent **only to the LLM endpoint you configure**. PL/Pilot has no
   telemetry, and the chat page cannot load anything from the internet (Content-Security-Policy).
+  MCP servers you add receive the arguments of the tool calls the agent makes there (e.g. a ticket key or
+  search text, or a comment you approved).
 - The connection password is never read. The API key is stored encrypted for your Windows user (DPAPI).
 - *Settings → Local data* controls what is kept on the PC:
   - **Save chat history** on/off — off means nothing is written, and saved chats and the prompt history
@@ -216,6 +234,36 @@ Most settings are self-explanatory in the settings page; a few worth knowing:
 - **Use DBA views** makes every query of the agent read `DBA_` instead of `ALL_` dictionary views (falls
   back to `ALL_` without `SELECT_CATALOG_ROLE`).
 - **Sub-task model** lets helper agents use a smaller, faster model.
+- **External tools (MCP):** *Add MCP Server*, enter a short name (it prefixes the tool names), the URL —
+  Streamable HTTP, usually `http://server:port/mcp`, or `…/sse` for older servers — and optional HTTP
+  headers such as `Authorization: Bearer …` (stored encrypted). *Test* connects and lists the tools; set each
+  one to *Read*, *Changes data* or *Off* (the default follows the server's read-only hint). The plug-in
+  starts no programs, so servers that only speak stdio have to run somewhere as an HTTP service. The timeout
+  per call is 300 s by default, for servers that run an LLM themselves; their progress messages appear under
+  the tool call. Proxy and *Trusted Certificates* apply to MCP servers too; the Windows login is only sent
+  when *Send Windows login* is checked. *Test* also lists the server's prompts (slash commands) and resources.
+- **Team MCP configuration:** one `mcp.json` for the whole team, in the format other MCP clients use — shipped
+  next to the plug-in (`PlugIns\PlsqlDevAgent\mcp.json`) and/or at *Team Configuration* (a file or folder, e.g.
+  on a network share; the configured file wins for servers of the same name). It is read again for each new chat.
+
+  ```json
+  {
+    "mcpServers": {
+      "tickets": {
+        "url": "http://tickets.example.local:8000/mcp",
+        "headers": { "Authorization": "Bearer ${env:TICKETS_TOKEN}" },
+        "timeout": 300,
+        "tools": { "ask": "read", "delete_ticket": "off" }
+      }
+    }
+  }
+  ```
+
+  Optional per server: `type` (`http`, `streamable-http` or `sse`), `windowsLogin`, `disabled`. Entries with a
+  `command` (stdio servers) are skipped. Keep secrets out of the file: use `${env:NAME}`, or let each user add
+  the header in the settings. Team servers appear in the settings with a *Team* badge; users can switch them
+  off, add their own headers (a header with the same name replaces the team's) and change every tool's mode —
+  only these changes are stored in their settings, so later changes of the team file still reach them.
 - **Compiler warnings** (on by default): the agent's compiles run with `PLSQL_WARNINGS` enabled (except a few
   noisy ones such as PLW-05018) and the warnings are reported to the model. The unit keeps that warnings
   setting; qualifiers it already had, such as `ERROR:06002`, stay in force. All other compiler settings of a
@@ -241,8 +289,13 @@ syntax-check the chat page.
 
 - **Harness** (`src\Harness`): runs the chat window outside PL/SQL Developer against a simulated IDE.
   `--mock-llm` uses a scripted fake model server, `--llm <baseUrl> <model>` a real one;
-  `--autotest <dir> [--offscreen]` runs the automated UI checks, `--screenshots <dir>` renders the
-  images in this README.
+  `--autotest <dir> [--offscreen]` runs the automated UI checks (including a scripted MCP server),
+  `--screenshots <dir>` renders the images in this README, `--mcp <name>=<url>[|<header>]` adds an MCP server.
+- **MCP test server** (`tools\mcp-test-server`): a small ticket system with commit history, built with the
+  official MCP Python SDK: `docker build -t plpilot-mcp-test tools/mcp-test-server`, then
+  `docker run -d -p 8801:8000 -e MCP_TOKEN=test-token plpilot-mcp-test` (Streamable HTTP,
+  `http://localhost:8801/mcp`, header `Authorization: Bearer test-token`) or with `-e MCP_TRANSPORT=sse`
+  (HTTP+SSE, `…/sse`).
 - **In-IDE self test** against a real PL/SQL Developer and a **test** database (it creates and drops
   objects): set `PLSQLDEVAGENT_AUTOTEST=<output dir>` and `PLSQLDEVAGENT_AUTOTEST_CONNECTION=<USER@DATABASE>`
   (exactly as shown in the chat header), then start PL/SQL Developer logged on, e.g.

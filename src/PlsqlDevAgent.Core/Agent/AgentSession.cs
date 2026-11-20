@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using PlsqlDevAgent.Agent.Mcp;
 using PlsqlDevAgent.Agent.Tools;
 using PlsqlDevAgent.Ide;
 using PlsqlDevAgent.Util;
@@ -56,6 +57,10 @@ namespace PlsqlDevAgent.Agent
 
         public AgentConfig Config { get; private set; }
         public ConnectionGuard Guard { get; } = new ConnectionGuard();
+        /// <summary>External tools (MCP servers) of this session.</summary>
+        public McpManager Mcp { get; } = new McpManager();
+        /// <summary>The MCP tools and prompt section of the current request.</summary>
+        private McpSnapshot _mcp = McpSnapshot.Empty;
         public bool IsBusy => _busy != 0;
         public int MessageCount => _history.Count;
 
@@ -65,7 +70,7 @@ namespace PlsqlDevAgent.Agent
             _ui = ui;
             Config = config;
             // tool calls get their own copy with the call id (ExecuteToolAsync); these are the defaults outside a call
-            _ctx = new ToolContext { Ide = ide, Config = config, RequestApproval = r => ApproveAsync(r, null), Guard = CurrentGuard };
+            _ctx = new ToolContext { Ide = ide, Config = config, RequestApproval = r => ApproveAsync(r, null), Guard = CurrentGuard, Mcp = Mcp };
             _ctx.SetTasks = SetTasks;
             _ctx.RunSubtask = task => RunSubtaskAsync(task, null, _ctx.Cancellation);
             _ctx.RecordChange = change =>
@@ -73,6 +78,7 @@ namespace PlsqlDevAgent.Agent
                 change.Checkpoint = _checkpoint;
                 Journal?.Add(change);
             };
+            Mcp.Configure(config); // connects in the background
         }
 
         /// <summary>Changes of the current chat, for rewinding (set by the chat window when the chat changes).</summary>
@@ -125,7 +131,14 @@ namespace PlsqlDevAgent.Agent
             Config = config;
             _ctx.Config = config;
             _systemPrompt = null; // rebuilt with the next message
+            Mcp.Configure(config);
         }
+
+        /// <summary>The MCP section of the system prompt with the servers connected now (prompt preview).</summary>
+        public string McpPromptSection => Mcp.Current().PromptSection;
+
+        /// <summary>Built-in tools and the tools of the connected MCP servers.</summary>
+        private IEnumerable<AgentTool> AllTools() => ToolRegistry.All().Concat(_mcp.Tools);
 
         public void OnConnectionChanged()
         {
@@ -192,7 +205,7 @@ namespace PlsqlDevAgent.Agent
         /// <summary>A tool context for actions the user triggers in the UI (restore backup …), approvals are implicit.</summary>
         public ToolContext UserActionContext() => new ToolContext
         {
-            Ide = _ide, Config = Config, Guard = CurrentGuard,
+            Ide = _ide, Config = Config, Guard = CurrentGuard, Mcp = Mcp,
             RequestApproval = r => Task.FromResult(ApprovalResult.Yes()),
         };
 
@@ -209,6 +222,7 @@ namespace PlsqlDevAgent.Agent
             _ui.ContextUsage(0, Config.ContextWindowTokens, true);
             _checkpoint = null;
             _checkpointMessages = new Dictionary<string, string>();
+            Mcp.Configure(Config); // a new chat picks up a changed team MCP configuration (unchanged servers stay connected)
         }
 
         public JArray ExportHistory() => (JArray)_history.DeepClone();
@@ -244,8 +258,10 @@ namespace PlsqlDevAgent.Agent
         /// <summary>
         /// Starts processing a user message in the background. Returns false if the agent is busy.
         /// <paramref name="checkpoint"/>: id of the user message for rewinding (null = keep the current one, e.g. retry).
+        /// <paramref name="expand"/>: produces the message text first (the prompt of an MCP server, /server:prompt);
+        /// the agent is busy (and can be stopped) meanwhile.
         /// </summary>
-        public bool Send(string userText, bool planMode = false, string checkpoint = null)
+        public bool Send(string userText, bool planMode = false, string checkpoint = null, Func<CancellationToken, Task<string>> expand = null)
         {
             if (IsBusy) return false;
             if (checkpoint != null)
@@ -253,7 +269,7 @@ namespace PlsqlDevAgent.Agent
                 _checkpoint = checkpoint;
                 Journal?.StartCheckpoint(checkpoint);
             }
-            if (!Start(ct => RunAsync(userText, planMode, ct))) return false;
+            if (!Start(async ct => await RunAsync(expand == null ? userText : await expand(ct).ConfigureAwait(false), planMode, ct).ConfigureAwait(false))) return false;
             _lastPlanMode = planMode;
             return true;
         }
@@ -302,6 +318,11 @@ namespace PlsqlDevAgent.Agent
                         : L.T("Stopped."));
                 }
                 catch (LlmException ex)
+                {
+                    CloseDanglingToolCalls("Not executed.");
+                    _ui.Error(ex.Message);
+                }
+                catch (McpException ex) // e.g. the prompt of a /server:prompt command could not be filled in
                 {
                     CloseDanglingToolCalls("Not executed.");
                     _ui.Error(ex.Message);
@@ -395,6 +416,11 @@ namespace PlsqlDevAgent.Agent
 
         private async Task RunTurnsAsync(string userText, bool planMode, CancellationToken ct)
         {
+            // external tools: the list only changes with the settings or the servers, so the prompt cache keeps working
+            var mcp = await Mcp.SnapshotAsync(ct).ConfigureAwait(false);
+            foreach (var n in mcp.Notices) _ui.Notice(n);
+            if (mcp.Signature != _mcp.Signature) _systemPrompt = null;
+            _mcp = mcp;
             var guard = CurrentGuard();
             var tools = AvailableTools(guard, planMode);
             var toolSchemas = new JArray(tools.Select(t => t.ToOpenAiTool()));
@@ -443,7 +469,7 @@ namespace PlsqlDevAgent.Agent
 
                 var messageId = "m" + Guid.NewGuid().ToString("N").Substring(0, 10);
                 // rebuilt after a connection change (other database version / NLS settings)
-                if (_systemPrompt == null) _systemPrompt = SystemPrompt.Build(Config, Config.HasWorkspace, Database());
+                if (_systemPrompt == null) _systemPrompt = SystemPrompt.Build(Config, Config.HasWorkspace, Database(), _mcp.PromptSection);
                 var messages = BuildMessages();
                 int sentChars = CharCount(messages);
                 _ui.AssistantStart(messageId);
@@ -528,9 +554,10 @@ namespace PlsqlDevAgent.Agent
                 for (int i = 0; i < calls.Count;)
                 {
                     ct.ThrowIfCancellationRequested();
-                    // consecutive run_subtask calls are independent research jobs: run them in parallel
+                    // consecutive run_subtask calls are independent research jobs and read-only MCP lookups are plain HTTP
+                    // requests: run them in parallel
                     int batchEnd = i;
-                    while (batchEnd < calls.Count && calls[batchEnd].Name == RunSubtaskTool.ToolName) batchEnd++;
+                    while (batchEnd < calls.Count && CanRunInParallel(calls[batchEnd], tools)) batchEnd++;
                     var batch = calls.Skip(i).Take(Math.Max(1, batchEnd - i)).ToList();
                     var results = batch.Count == 1
                         ? new[] { await ExecuteToolAsync(batch[0], tools).ConfigureAwait(false) }
@@ -542,10 +569,13 @@ namespace PlsqlDevAgent.Agent
             }
         }
 
-        private List<AgentTool> AvailableTools(GuardState guard, bool planMode) => ToolRegistry.All()
+        private List<AgentTool> AvailableTools(GuardState guard, bool planMode) => AllTools()
             .Where(t => !((guard.ReadOnly || planMode) && t.Mutating))
             .Where(t => !t.NeedsWorkspace || Config.HasWorkspace)
             .ToList();
+
+        private static bool CanRunInParallel(ToolCall call, List<AgentTool> tools) =>
+            call.Name == RunSubtaskTool.ToolName || tools.FirstOrDefault(t => t.Name == call.Name) is McpTool m && m.CanRunInParallel;
 
         /// <summary>
         /// A helper agent for run_subtask: own fresh conversation, read-only tools, no approvals, returns its final report.
@@ -553,13 +583,14 @@ namespace PlsqlDevAgent.Agent
         /// </summary>
         private async Task<string> RunSubtaskAsync(string task, string parentCallId, CancellationToken ct)
         {
-            var tools = ToolRegistry.All()
+            var tools = AllTools()
                 .Where(t => !t.Mutating && t.Name != "run_subtask" && t.Name != "update_tasks")
                 .Where(t => !t.NeedsWorkspace || Config.HasWorkspace)
                 .ToList();
             var schemas = new JArray(tools.Select(t => t.ToOpenAiTool()));
             // shares the schema cache with the agent and the other helpers that run in parallel
             var subCtx = _ctx.ForHelper(ct, r => Task.FromResult(new ApprovalResult { Approved = false, Feedback = "Helper agents are read-only." }));
+            if (parentCallId != null) subCtx.Progress = text => _ui.SubtaskStep(parentCallId, text);
             string context = "";
             try
             {
@@ -569,7 +600,7 @@ namespace PlsqlDevAgent.Agent
             catch { }
             var messages = new JArray
             {
-                new JObject { ["role"] = "system", ["content"] = SystemPrompt.BuildSubtask(Config, Database()) },
+                new JObject { ["role"] = "system", ["content"] = SystemPrompt.BuildSubtask(Config, Database(), _mcp.PromptSection) },
                 new JObject { ["role"] = "user", ["content"] = context + "Task: " + task },
             };
             // optionally a smaller / faster model for the research
@@ -651,7 +682,7 @@ namespace PlsqlDevAgent.Agent
 
             if (tool == null)
             {
-                var known = ToolRegistry.All().Any(t => t.Name == call.Name && t.Mutating);
+                var known = AllTools().Any(t => t.Name == call.Name && t.Mutating);
                 var msg = known
                     ? $"Error: '{call.Name}' is not available now (plan mode or read-only connection). Describe the change instead."
                     : $"Error: unknown tool '{call.Name}'. Available tools: {string.Join(", ", tools.Select(t => t.Name))}.";
@@ -677,6 +708,7 @@ namespace PlsqlDevAgent.Agent
             var callCtx = _ctx.ForCall(call.Id);
             callCtx.RequestApproval = r => ApproveAsync(r, call.Id);
             callCtx.RunSubtask = task => RunSubtaskAsync(task, call.Id, callCtx.Cancellation);
+            callCtx.Progress = text => _ui.SubtaskStep(call.Id, text);
             if (!_ide.UsesOwnSession) callCtx.ResetSchemaCache(); // the user's windows share the session and may have switched the schema
             try
             {
@@ -687,7 +719,7 @@ namespace PlsqlDevAgent.Agent
                 _ui.ToolEnd(call.Id, false, "Cancelled.", callCtx.UiMeta);
                 throw;
             }
-            catch (Exception ex) when (ex is ToolArgumentException || ex is OracleSqlException || ex is IdeException || ex is TimeoutException)
+            catch (Exception ex) when (ex is ToolArgumentException || ex is OracleSqlException || ex is IdeException || ex is TimeoutException || ex is McpException)
             {
                 ok = false;
                 result = "Error: " + ex.Message;
@@ -885,7 +917,7 @@ namespace PlsqlDevAgent.Agent
             }
 
             // may run on the UI thread (token estimate): never reads the database here
-            var messages = new JArray { new JObject { ["role"] = "system", ["content"] = _systemPrompt ?? SystemPrompt.Build(Config, Config.HasWorkspace, Database(load: false)) } };
+            var messages = new JArray { new JObject { ["role"] = "system", ["content"] = _systemPrompt ?? SystemPrompt.Build(Config, Config.HasWorkspace, Database(load: false), _mcp.PromptSection) } };
             foreach (var m in _history) messages.Add(m.DeepClone());
             return messages;
         }
@@ -932,6 +964,7 @@ namespace PlsqlDevAgent.Agent
         {
             Cancel();
             _client.Dispose();
+            Mcp.Dispose();
         }
 
         private sealed class Sink : IStreamSink

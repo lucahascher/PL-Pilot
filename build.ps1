@@ -68,6 +68,21 @@ file / folder with PL/Pilot Settings -> Company Rules (e.g. a network share).
 Settings -> Company Rules -> Edit... creates a file from a template you can adapt.
 "@ | Set-Content (Join-Path $rulesDir "README.txt") -Encoding UTF8
 
+# Example of a team MCP configuration: renamed to mcp.json (next to the plug-in or on a share) it is loaded.
+# Single-quoted here-string: ${env:...} must stay as written.
+@'
+{
+  "mcpServers": {
+    "tickets": {
+      "url": "http://tickets.example.local:8000/mcp",
+      "headers": { "Authorization": "Bearer ${env:TICKETS_TOKEN}" },
+      "timeout": 300,
+      "tools": { "ask": "read", "delete_ticket": "off" }
+    }
+  }
+}
+'@ | Set-Content (Join-Path $managedOut "mcp.example.json") -Encoding UTF8
+
 # ---------------------------------------------------------------- 2. native shim (x64, static CRT)
 Write-Host "== Building native shim" -ForegroundColor Cyan
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"

@@ -272,19 +272,39 @@ namespace PlsqlDevAgent.Agent.Tools
         public override string Name => "run_query";
         public override string Description =>
             "Runs a read-only SELECT (or WITH) query in the agent's database session and returns the rows as text. " +
-            "Use it to inspect data and the data dictionary (ALL_TABLES, ALL_TAB_COLUMNS, ALL_SOURCE, ALL_DEPENDENCIES, " +
-            "V$ views…). Always restrict the result (WHERE, FETCH FIRST n ROWS ONLY).";
+            "Use it to inspect data and the data dictionary (ALL_TABLES, ALL_TAB_COLUMNS, ALL_DEPENDENCIES, V$ views…); " +
+            "restrict data queries (WHERE, FETCH FIRST n ROWS ONLY). Not for reading PL/SQL source code: get_object_source " +
+            "returns a whole unit or a large line range in one call, search_source finds lines.";
         public override JObject Parameters => Schema(
             Req("sql", "string", "A single SELECT statement, without trailing semicolon."),
             Opt("max_rows", "integer", "Maximum rows to return (default 50)."));
         public override string Summarize(JObject args) => OneLine(Str(args, "sql"));
 
-        public override Task<string> ExecuteAsync(JObject args, ToolContext ctx)
+        public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
             var sql = PrepareStatement(ReqStr(args, "sql"));
-            if (!IsReadOnlyQuery(sql, out var reason)) return Task.FromResult("Not executed: " + reason);
+            if (!IsReadOnlyQuery(sql, out var reason)) return "Not executed: " + reason;
             int max = Math.Max(1, Math.Min(Int(args, "max_rows", 50), ctx.Config.MaxQueryRows));
-            return QueryRunner.RunAsync(ctx, sql, max);
+            var result = await QueryRunner.RunAsync(ctx, sql, max).ConfigureAwait(false);
+            if (ReadsSourceText(sql)) result += "\n\n" + SourceReadNote;
+            return result;
+        }
+
+        /// <summary>
+        /// Models tend to page through ALL_SOURCE / DBA_SOURCE with run_query, 20 lines per call – every call a slow round
+        /// trip to the model. A query that reads the TEXT of *_SOURCE (not a search or a count) gets this note.
+        /// </summary>
+        internal const string SourceReadNote =
+            "Note: do not read PL/SQL source with run_query on ALL_SOURCE / DBA_SOURCE / USER_SOURCE. Use get_object_source: " +
+            "it returns the whole unit in one call, or – for a very large unit – a large range with start_line / end_line " +
+            "(e.g. a whole subprogram). Every call is a slow round trip to the model, so read source in as few calls as possible.";
+
+        internal static bool ReadsSourceText(string sql)
+        {
+            var s = StripStringsAndComments(sql);
+            return Regex.IsMatch(s, @"\b(ALL|DBA|USER|CDB)_SOURCE\b", RegexOptions.IgnoreCase)
+                && Regex.IsMatch(s, @"\bTEXT\b", RegexOptions.IgnoreCase)
+                && !Regex.IsMatch(s, @"\bLIKE\b|\bINSTR\s*\(|\bREGEXP_(LIKE|INSTR|COUNT)\b|\bCOUNT\s*\(", RegexOptions.IgnoreCase);
         }
 
         internal static string OneLine(string s)
@@ -525,9 +545,10 @@ namespace PlsqlDevAgent.Agent.Tools
         public override string Name => "get_object_source";
         public override string Description =>
             "Returns the source / DDL of a database object as stored in the database: PL/SQL units (for a package the " +
-            "spec and body), views, triggers, types, and DDL for tables, indexes, sequences etc. Large units are cut at the " +
-            "output limit with a note where to continue; read further parts with start_line / end_line (for a package body " +
-            "use object_type PACKAGE BODY).";
+            "spec and body), views, triggers, types, and DDL for tables, indexes, sequences etc. This is THE way to read " +
+            "stored source: one call returns the whole unit (about 1,000 lines fit). Large units are cut at the output limit " +
+            "with a note where to continue; read further parts with start_line / end_line (for a package body use object_type " +
+            "PACKAGE BODY). Read large ranges – a whole subprogram or more – not a few lines per call.";
         public override JObject Parameters => Schema(
             Req("name", "string", "Object name, optionally OWNER.NAME."),
             Opt("object_type", "string", "e.g. PACKAGE, PACKAGE BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, VIEW, TABLE. For PACKAGE both spec and body are returned."),
@@ -677,7 +698,8 @@ namespace PlsqlDevAgent.Agent.Tools
         public override string Name => "search_source";
         public override string Description =>
             "Searches PL/SQL source code in the database (ALL_SOURCE) for a text, case-insensitive. Returns matching " +
-            "lines with object name and line number. Good for finding usages of a table, column or procedure.";
+            "lines with object name and line number. Good for finding usages of a table, column or procedure. To read the " +
+            "code around a match, call get_object_source with start_line / end_line covering the whole subprogram.";
         public override JObject Parameters => Schema(
             Req("text", "string", "Text to search for (plain text, not a pattern)."),
             Opt("owner", "string", "Schema to search; default the current schema; '*' for all accessible schemas."),

@@ -148,6 +148,12 @@ namespace PlsqlDevAgent.Agent.Tools
         /// <summary>Runs a helper agent with a fresh context and returns its report (run_subtask).</summary>
         public Func<string, Task<string>> RunSubtask;
 
+        /// <summary>Shows a progress line under the tool call in the chat (e.g. messages of a slow MCP server); may be null.</summary>
+        public Action<string> Progress;
+
+        /// <summary>The MCP servers of the session (resources for @server:… mentions); may be null.</summary>
+        public PlsqlDevAgent.Agent.Mcp.McpManager Mcp;
+
         /// <summary>Tool call this context belongs to (see <see cref="ForCall"/>).</summary>
         public string CallId;
 

@@ -84,13 +84,8 @@ namespace PlsqlDevAgent.Agent
                 var key = cfg.UseSystemProxy + "|" + cfg.RequestTimeoutSeconds + "|" + cfg.TrustedCertificates;
                 if (_http != null && _httpKey == key) return _http;
                 // not disposed: a parallel request may still use the previous client; it is released by the GC
-                // The Windows login goes to the company proxy only, never to the LLM server itself (it uses the API key):
-                // otherwise a server or an attacker in between could request NTLM/Kerberos authentication and capture it.
-                var handler = new HttpClientHandler { UseProxy = cfg.UseSystemProxy, UseDefaultCredentials = false };
-                if (cfg.UseSystemProxy) handler.DefaultProxyCredentials = CredentialCache.DefaultCredentials;
-                var pins = Certificates.ParseThumbprints(cfg.TrustedCertificates);
-                handler.ServerCertificateCustomValidationCallback = (request, cert, chain, errors) =>
-                    Certificates.Validate(request.RequestUri, cert, chain, errors, pins);
+                // The LLM server uses the API key: the Windows login only goes to the company proxy (HttpFactory).
+                var handler = HttpFactory.Handler(cfg.UseSystemProxy, cfg.TrustedCertificates);
                 _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(Math.Max(30, cfg.RequestTimeoutSeconds)) };
                 _httpKey = key;
                 return _http;
@@ -98,31 +93,10 @@ namespace PlsqlDevAgent.Agent
         }
 
         /// <summary>A readable message for connection errors (certificate and TLS problems instead of .NET's generic text).</summary>
-        private static LlmException ConnectionError(string url, HttpRequestException ex)
-        {
-            var host = Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "";
-            var problem = Certificates.LastProblem(host);
-            if (problem != null) return new LlmException(L.T("The HTTPS certificate of {0} is not accepted: {1}", host, problem));
-            if (ex.InnerException is WebException we && we.Status == WebExceptionStatus.SecureChannelFailure)
-                return new LlmException(L.T("Could not establish a secure (TLS) connection to {0}. The server may require a TLS version or cipher that Windows on this PC does not offer. ({1})",
-                    url, ex.GetBaseException().Message));
-            return new LlmException(L.T("Could not reach {0}: {1}", url, ex.GetBaseException().Message));
-        }
+        private static LlmException ConnectionError(string url, HttpRequestException ex) =>
+            new LlmException(HttpFactory.DescribeConnectionError(url, ex));
 
-        /// <summary>
-        /// .NET Framework allows only 2 parallel connections per server for desktop programs, which would queue the
-        /// requests of parallel helper agents. Raised for the LLM endpoint only (not process wide).
-        /// </summary>
-        private static void AllowParallelRequests(string url)
-        {
-            try
-            {
-                var sp = ServicePointManager.FindServicePoint(new Uri(url));
-                if (sp.ConnectionLimit < 16) sp.ConnectionLimit = 16;
-                sp.UseNagleAlgorithm = false; // small request bodies are sent at once instead of waiting for an ACK
-            }
-            catch (Exception ex) { Util.Log.Warn("Could not configure the connection to " + url + ": " + ex.Message); }
-        }
+        private static void AllowParallelRequests(string url) => HttpFactory.AllowParallelRequests(url);
 
         public async Task<AssistantTurn> StreamChatAsync(AgentConfig cfg, JArray messages, JArray tools, IStreamSink sink, CancellationToken ct)
         {

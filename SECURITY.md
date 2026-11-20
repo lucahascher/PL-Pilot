@@ -26,15 +26,25 @@ data or credentials.
 - The connection password is never read. The API key is stored encrypted with Windows DPAPI.
 - The chat page runs only its own script (Content-Security-Policy with a per-load nonce); everything the
   model or the database returns is escaped.
-- PL/Pilot sends data only to the LLM endpoint you configure and has no telemetry.
+- PL/Pilot sends data only to the LLM endpoint you configure and has no telemetry. MCP servers you add
+  receive the arguments of the tool calls the agent makes there.
+- MCP servers are reached over HTTP only; the plug-in starts no processes. MCP tools that change data ask
+  first and are removed in plan mode, read-only mode and on protected connections; tools marked destructive
+  always ask. Their headers (tokens) are stored with DPAPI, and the Windows login is only sent to a server
+  when that is enabled for it. A team `mcp.json` should not contain secrets (use `${env:NAME}` or per-user
+  headers); the settings page never shows the header values of the team file. Resources attached with
+  `@server:…` are marked as external data like tool results; prompts of a server (`/server:prompt`) become the
+  user's own message, so only run prompts of servers you trust.
 
 ## Known limitations
 
 - **Read-only is not a hard guarantee.** It means the agent issues no changing statements. A query can
   still call existing functions that have side effects (autonomous transactions, network packages). On
   production use a database account with read-only privileges.
-- **Prompt injection.** Text from the database, files or the editor can contain instructions for the
-  model. The approvals are the safety net: read what you approve, and keep the auto-approve settings off
-  on important databases.
+- **Prompt injection.** Text from the database, files, the editor or an external system (tickets, commit
+  messages via MCP) can contain instructions for the model. MCP results are marked as external data and the
+  model is told not to follow instructions in them, but that is not a guarantee. The approvals are the
+  safety net: read what you approve, and keep the auto-approve settings off on important databases —
+  especially with MCP servers connected (the settings warn about that combination).
 - Statements that already run in the database cannot be interrupted by a plug-in; *Stop* only stops
   waiting for them.

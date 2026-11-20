@@ -32,9 +32,10 @@ namespace PlsqlDevAgent.Agent
 
         /// <summary>Instruction for the model (system prompt) while the setting is on.</summary>
         public const string PromptRule =
-            "- Company policy: query the DBA_ data dictionary views (DBA_OBJECTS, DBA_TABLES, DBA_TAB_COLUMNS, DBA_SOURCE, " +
+            "- Company policy: query the DBA_ data dictionary views (DBA_OBJECTS, DBA_TABLES, DBA_TAB_COLUMNS, " +
             "DBA_DEPENDENCIES …) instead of the ALL_ views in every query you run. Filter them by OWNER, because unlike the ALL_ " +
-            "views they list the objects of all schemas. Queries that use ALL_ views are rewritten to DBA_ automatically.";
+            "views they list the objects of all schemas. Queries that use ALL_ views are rewritten to DBA_ automatically. " +
+            "The tools (get_object_source, search_source …) follow this policy by themselves.";
 
         /// <summary>
         /// Replaces references to ALL_ dictionary views (also SYS.ALL_…) by the DBA_ views. String literals, quoted

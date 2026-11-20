@@ -126,6 +126,12 @@ namespace PlsqlDevAgent.Harness
                     : Final($"Findings{label}: table EMP is used in EMP_API.list_emps (line 4).");
             }
 
+            // two read-only MCP lookups in one answer (they must run in parallel)
+            if (request.Contains("MCPPARALLEL"))
+                return calls.Contains("tickets__slow_lookup")
+                    ? Final("Both lookups done.")
+                    : ToolCalls(("mp_1", "tickets__slow_lookup", new JObject { ["key"] = "A" }), ("mp_2", "tickets__slow_lookup", new JObject { ["key"] = "B" }));
+
             // "TOOL: <name> <json>" lines: calls exactly these tools, one per answer in the given order, then answers "Done."
             var toolLines = System.Text.RegularExpressions.Regex.Matches(request, @"^TOOL: (\S+)[ \t]*(.*?)\s*$", System.Text.RegularExpressions.RegexOptions.Multiline);
             if (toolLines.Count > 0)
@@ -302,6 +308,8 @@ namespace PlsqlDevAgent.Harness
         /// <summary>System prompt of the most recent main-agent request (to verify prompt customization).</summary>
         public static string LastSystemPrompt = "";
         public static string LastUserContent = "";
+        /// <summary>The tool schemas of the most recent main-agent request (every request, not only scripted flows).</summary>
+        public static string LastRequestToolsJson = "";
         /// <summary>All messages of the most recent main-agent request.</summary>
         public static string LastMessagesJson = "";
         /// <summary>The messages of every main-agent request (to see whether earlier messages stayed unchanged).</summary>
@@ -316,6 +324,7 @@ namespace PlsqlDevAgent.Harness
             {
                 LastSystemPrompt = system;
                 LastMessagesJson = messages.ToString(Formatting.None);
+                LastRequestToolsJson = (request["tools"] as JArray)?.ToString(Formatting.None) ?? "";
                 lock (MainRequests) MainRequests.Add((JArray)messages.DeepClone());
                 var lastUserMsg = messages.OfType<JObject>().LastOrDefault(m => (string)m["role"] == "user");
                 if (lastUserMsg != null) LastUserContent = (string)lastUserMsg["content"] ?? "";

@@ -285,6 +285,26 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
 .setting .row { display: flex; gap: 6px; max-width: 520px; }
 .setting .row input { flex: 1; min-width: 0; }
 #testResult { margin-top: 6px; font-size: 12px; white-space: pre-wrap; }
+.mcp-server { border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px 8px; margin: 0 0 8px; max-width: 560px; }
+.mcp-server .row { margin-top: 6px; align-items: center; max-width: none; }
+.mcp-server .row label { display: flex; gap: 6px; align-items: center; white-space: nowrap; cursor: pointer; }
+.mcp-server .row input.mcp-timeout { flex: none; width: 70px; }
+.mcp-server .lbl { font-size: 12px; color: var(--desc); margin-top: 6px; }
+.mcp-server textarea { width: 100%; }
+.mcp-server .secret:not(:focus) { -webkit-text-security: disc; }
+.mcp-server .badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--badge); color: #fff; white-space: nowrap; }
+.mcp-server input:disabled { opacity: .75; }
+.mcp-offers { font-size: 12px; color: var(--desc); margin-top: 2px; white-space: pre-wrap; }
+.mcp-status { font-size: 12px; margin-top: 6px; white-space: pre-wrap; }
+.mcp-status.ok { color: var(--success); }
+.mcp-status.bad { color: var(--error); }
+.mcp-tools { margin-top: 4px; font-size: 12px; }
+.mcp-tools .trow { display: flex; gap: 8px; align-items: center; padding: 3px 0; border-top: 1px solid var(--border); }
+.mcp-tools .tn { flex: 1; min-width: 0; }
+.mcp-tools .tn b { font-family: var(--mono, Consolas, monospace); font-weight: 600; }
+.mcp-tools .tn div { color: var(--desc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting .mcp-tools select { width: auto; flex: none; }
+#mcpError { color: var(--error); margin-top: 6px; white-space: pre-wrap; }
 .settings-foot { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--border); flex: none; }
 .settings-foot .spacer { flex: 1; }
 .small { font-size: 12px; color: var(--desc); }
@@ -392,6 +412,17 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
     <div class="setting"><div class="s-title"><span class="s-cat">Agent: </span>Confirm Slow Queries (s)</div><div class="s-desc">Before a query of the agent runs, Oracle estimates its runtime (the query is not executed for that). At or above this many seconds you are asked first, because a running statement cannot be stopped. 0 = never ask.</div><input id="ConfirmSlowQuerySeconds" type="number" min="0"></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Agent: </span>Compiler Warnings</div><label><input type="checkbox" id="CompilerWarnings"><span class="s-desc">When the agent compiles PL/SQL, the Oracle compiler warnings (PLSQL_WARNINGS) are turned on and reported to it. The unit keeps this setting; warnings your settings treat as errors stay errors.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Agent: </span>Suggest Objects After @</div><label><input type="checkbox" id="MentionSuggestions"><span class="s-desc">Typing @ in the input box looks up matching database objects (two small queries each time you pause typing). Off: no database queries while you type; @NAME still attaches the object when you send the message.</span></label></div>
+
+    <h4>External Tools (MCP)</h4>
+    <div class="setting"><div class="s-title"><span class="s-cat">MCP: </span>Team Configuration</div>
+      <div class="s-desc">An mcp.json file, or a folder containing one, with the MCP servers of your team, e.g. on a network share (%VARIABLES% allowed). An mcp.json next to the plug-in is always loaded as well. Team servers are listed below: you can switch them off, add your own headers (e.g. your token) and change the mode of every tool.</div>
+      <div class="row"><input id="McpConfigPath" placeholder="\\fileserver\dev\plsql-agent\mcp.json"><button id="btnBrowseMcp" title="Choose a file">…</button></div>
+      <div id="mcpTeamInfo" class="small" style="white-space:pre-wrap;margin-top:6px"></div></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">MCP: </span>Servers</div>
+      <div class="s-desc">MCP servers give the agent access to other systems, e.g. your ticket system or version control. The server must be reachable over HTTP (Streamable HTTP or HTTP+SSE); the plug-in starts no programs. Read tools run without asking; tools that change data ask you first and are not available in plan mode and on read-only connections.</div>
+      <div id="mcpList"></div>
+      <div class="row"><button id="btnAddMcp">Add MCP Server</button></div>
+      <div id="mcpError" class="small"></div></div>
 
     <h4>Safety</h4>
     <div class="setting"><div class="s-title"><span class="s-cat">Safety: </span>Protected Connections</div><div class="s-desc">The agent is read-only on connections matching these patterns (user@database or database, wildcards * and ?, separated by ;). Can be unlocked per session in the chat header.</div><input id="ProtectedConnections" placeholder="*PROD*;*PRD*"></div>
@@ -631,6 +662,28 @@ const DE = {
   'Replace the current text with the template?': 'Den aktuellen Text durch die Vorlage ersetzen?', 'Effective System Prompt': 'Vollständiger System-Prompt',
   '{0} characters, about {1} tokens. This is what the model receives as system prompt with the current settings (the IDE context is sent with each message).':
     '{0} Zeichen, etwa {1} Tokens. So erhält das Modell den System-Prompt mit den aktuellen Einstellungen (der IDE-Kontext wird mit jeder Nachricht gesendet).',
+  // external tools (MCP)
+  'External Tools (MCP)': 'Externe Tools (MCP)', 'Servers': 'Server', 'Add MCP Server': 'MCP-Server hinzufügen',
+  'MCP servers give the agent access to other systems, e.g. your ticket system or version control. The server must be reachable over HTTP (Streamable HTTP or HTTP+SSE); the plug-in starts no programs. Read tools run without asking; tools that change data ask you first and are not available in plan mode and on read-only connections.':
+    'MCP-Server geben dem Agent Zugriff auf andere Systeme, z. B. Ihr Ticketsystem oder die Versionsverwaltung. Der Server muss per HTTP erreichbar sein (Streamable HTTP oder HTTP+SSE); das Plug-in startet keine Programme. Lesende Tools laufen ohne Rückfrage; Tools, die Daten ändern, fragen vorher und stehen im Planmodus und bei schreibgeschützten Verbindungen nicht zur Verfügung.',
+  'Enabled': 'Aktiv', 'Name, e.g. tickets': 'Name, z. B. tickets', 'Remove': 'Entfernen', 'Remove this server': 'Diesen Server entfernen',
+  'Team Configuration': 'Team-Konfiguration',
+  'An mcp.json file, or a folder containing one, with the MCP servers of your team, e.g. on a network share (%VARIABLES% allowed). An mcp.json next to the plug-in is always loaded as well. Team servers are listed below: you can switch them off, add your own headers (e.g. your token) and change the mode of every tool.':
+    'Eine mcp.json-Datei oder ein Ordner mit einer solchen, mit den MCP-Servern Ihres Teams, z. B. auf einem Netzlaufwerk (%VARIABLEN% erlaubt). Eine mcp.json neben dem Plug-in wird immer zusätzlich geladen. Die Team-Server stehen unten: Sie können sie ausschalten, eigene Header ergänzen (z. B. Ihr Token) und den Modus jedes Tools ändern.',
+  'Reading the team configuration…': 'Team-Konfiguration wird gelesen…', 'Headers of the team configuration: {0}.': 'Header der Team-Konfiguration: {0}.',
+  'From the team configuration': 'Aus der Team-Konfiguration', 'Team': 'Team', 'Set in the team configuration': 'In der Team-Konfiguration festgelegt',
+  'Your own HTTP headers, one per line; a header with the same name replaces the one of the team (e.g. your token). Stored encrypted for your Windows user.':
+    'Ihre eigenen HTTP-Header, einer pro Zeile; ein Header mit gleichem Namen ersetzt den des Teams (z. B. Ihr Token). Verschlüsselt für Ihren Windows-Benutzer gespeichert.',
+  'The team configuration already has a server named {0}: choose another name.': 'Die Team-Konfiguration enthält bereits einen Server namens {0}: Bitte einen anderen Namen wählen.',
+  'Commands: {0}': 'Befehle: {0}', 'Resources: attach with @{0}:… ({1} resource(s){2})': 'Ressourcen: mit @{0}:… anhängen ({1} Ressource(n){2})',
+  'HTTP headers, one per line (e.g. Authorization: Bearer …). Stored encrypted for your Windows user.': 'HTTP-Header, einer pro Zeile (z. B. Authorization: Bearer …). Verschlüsselt für Ihren Windows-Benutzer gespeichert.',
+  'Timeout (s)': 'Zeitlimit (s)', 'Send Windows login': 'Windows-Anmeldung senden',
+  'Only for servers that require Windows authentication (NTLM/Kerberos).': 'Nur für Server, die eine Windows-Anmeldung (NTLM/Kerberos) verlangen.',
+  'Read (runs without asking)': 'Lesen (ohne Rückfrage)', 'Changes data (asks first)': 'Ändert Daten (fragt vorher)', 'Off': 'Aus',
+  'Connected: {0} ({1}, protocol {2}), {3} tool(s)': 'Verbunden: {0} ({1}, Protokoll {2}), {3} Tool(s)', 'The server sent no tools.': 'Der Server bietet keine Tools an.',
+  'Connecting…': 'Verbindung wird hergestellt…', 'Not connected: {0}': 'Nicht verbunden: {0}',
+  'Not connected yet. Use Test to check the connection and list the tools.': 'Noch nicht verbunden. Mit „Testen“ die Verbindung prüfen und die Tools anzeigen.',
+  'Disabled: the agent does not use this server.': 'Deaktiviert: Der Agent verwendet diesen Server nicht.',
 };
 /** Translates an English text (and fills in {0}, {1} …). */
 function t(en, ...args) {
@@ -641,7 +694,7 @@ function t(en, ...args) {
 const tr = t; // alias for places where 't' is used as a variable name
 /** Translates the static texts, placeholders and tooltips outside the chat messages. */
 function applyI18n() {
-  const skip = '#messages, #chatList, #popup, #tasks, #txn, #ctx, #modelLabel, #meter, #hint, #guard, #btnMode, #promptState, #rulesInfo, #testResult, #ctxDetect, #edInfo, #edTitle, script, style';
+  const skip = '#messages, #chatList, #popup, #tasks, #txn, #ctx, #modelLabel, #meter, #hint, #guard, #btnMode, #promptState, #rulesInfo, #testResult, #ctxDetect, #edInfo, #edTitle, #mcpList, #mcpError, #mcpTeamInfo, script, style';
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT,
     { acceptNode: n => n.parentElement && !n.parentElement.closest(skip) && n.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
   const nodes = [];
@@ -1066,7 +1119,8 @@ function assistantEnd(id) {
 }
 function toolStart(m) {
   const d = el('details', 'tool running');
-  d.innerHTML = '<summary>' + icon('chev', 'chev') + '<span class="status"><span class="spinner"></span></span><span class="tname">' + esc(m.name) + '</span><span class="tsum">' + esc(m.summary || '') + '</span></summary>' +
+  // MCP tools ("tickets__get_ticket") are shown as "tickets › get_ticket"
+  d.innerHTML = '<summary>' + icon('chev', 'chev') + '<span class="status"><span class="spinner"></span></span><span class="tname">' + esc(String(m.name || '').replace('__', ' › ')) + '</span><span class="tsum">' + esc(m.summary || '') + '</span></summary>' +
     '<div class="tbody"><div class="label">' + t('Input') + '</div><pre>' + esc(m.args || '') + '</pre><div class="result"></div></div>';
   tools[m.callId] = d;
   if (needHead) { const b = responseBlock('assistant'); append(b); }
@@ -1261,6 +1315,7 @@ let pop = { open: false, items: [], active: 0, kind: null, start: 0, q: '' };
 let mentionTimer = null;
 function kindIcon(item) {
   if (item.kind === 'command') return icon('terminal');
+  if (/:/.test(item.label || '')) return icon('attach'); // a resource of an MCP server (@server:…)
   const d = (item.detail || '').toLowerCase();
   if (d === 'file') return icon('newfile');
   if (d === 'table' || d === 'view' || d === 'materialized view') return icon('table');
@@ -1291,23 +1346,25 @@ function moveActive(delta) {
 function choose(i) {
   const it = pop.items[i]; if (!it) return;
   const v = inputEl.value, caret = inputEl.selectionStart;
-  const insert = (pop.kind === 'command' ? '/' : '@') + it.insert + ' ';
+  // partial: the start of an MCP resource ("server:" or a template "server:ticket/"): typing goes on, suggestions stay
+  const insert = (pop.kind === 'command' ? '/' : '@') + it.insert + (it.partial ? '' : ' ');
   inputEl.value = v.slice(0, pop.start) + insert + v.slice(caret);
   const pos = pop.start + insert.length;
   inputEl.setSelectionRange(pos, pos);
   closePopup(); autosize(); inputEl.focus();
+  if (it.partial) updatePopup();
 }
 function updatePopup() {
   const caret = inputEl.selectionStart;
   const before = inputEl.value.slice(0, caret);
-  let m = before.match(/^\/([\w-]*)$/);
+  let m = before.match(/^\/([\w-]*(?::[\w.-]*)?)$/);
   if (m) {
     const q = m[1].toLowerCase();
     const items = commands.filter(c => c.name.startsWith(q)).map(c => ({ label: '/' + c.name, detail: c.description, insert: c.name }));
     showPopup('command', items, 0, q);
     return;
   }
-  m = before.match(/(^|[\s(,;])@([\w$#.\-\/\\]*)$/);
+  m = before.match(/(^|[\s(,;])@([\w$#.\-\/\\]*(?::[^\s]*)?)$/);
   if (m) {
     const q = m[2], start = caret - q.length - 1;
     clearTimeout(mentionTimer);
@@ -1429,7 +1486,7 @@ function replay(events) {
 
 // ---------------------------------------------------------------- settings editor
 const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'DetectContextWindow', 'CompactAtPercent', 'RequestTimeoutSeconds', 'ExtraBodyJson',
-  'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
+  'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'McpConfigPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
   'MaxQueryRows', 'ConfirmSlowQuerySeconds', 'CompilerWarnings', 'MentionSuggestions', 'ProtectedConnections', 'BackupBeforeChanges',
   'SaveChatHistory', 'ChatHistoryContent', 'ChatRetentionDays', 'BackupRetentionDays', 'LogRetentionDays',
   'ReadOnlyMode', 'SeparateSession', 'UseDbaViews', 'AutoApproveEditorEdits', 'AutoApproveSql', 'AutoApproveFileWrites', 'DevTools', 'Theme', 'Language'];
@@ -1439,6 +1496,7 @@ function openSettings(cfg) {
   FIELDS.forEach(f => { const e = $(f); if (!e) return; if (e.type === 'checkbox') e.checked = !!cfg[f]; else e.value = cfg[f] ?? ''; });
   $('testResult').textContent = '';
   $('ctxDetect').textContent = '';
+  renderMcpList(cfg.McpServers || []);
   if (!$('rulesInfo').textContent) $('rulesInfo').textContent = t('Checking rule files…');
   updatePromptState();
   $('settings').classList.add('open');
@@ -1501,11 +1559,182 @@ document.querySelectorAll('#settingsBody h4').forEach(h => {
 function readSettings() {
   const o = Object.assign({}, settingsBase);
   FIELDS.forEach(f => { const e = $(f); if (!e) return; o[f] = e.type === 'checkbox' ? e.checked : e.type === 'number' ? (e.value === '' ? 0 : +e.value) : e.value; });
+  o.McpServers = readMcpServers();
   return o;
 }
+
+// ---------------------------------------------------------------- external tools (MCP servers)
+// Own servers are edited completely; servers of the team configuration (mcp.json) keep name, URL, timeout and
+// Windows login from the team file – the user may switch them off, add own headers and change every tool's mode.
+let mcpUid = 0;
+// uid -> { tools: [{name, description, defaultMode}] | null (unknown), saved: {tool: mode} (own settings), team: team server | null }
+const mcpState = {};
+let mcpUserTeam = [];     // the user's settings for team servers (entries with Team = true)
+let mcpTeamLoaded = false;
+const MCP_MODES = [['read', 'Read (runs without asking)'], ['write', 'Changes data (asks first)'], ['off', 'Off']];
+function renderMcpList(servers) {
+  Object.keys(mcpState).forEach(k => delete mcpState[k]);
+  $('mcpList').innerHTML = '';
+  $('mcpError').textContent = '';
+  $('mcpTeamInfo').textContent = t('Reading the team configuration…');
+  mcpUserTeam = servers.filter(s => s.Team);
+  mcpTeamLoaded = false;
+  servers.filter(s => !s.Team).forEach(s => $('mcpList').appendChild(mcpCard(s, null)));
+}
+/** The servers of the team configuration (they are listed first). */
+function renderMcpTeam(m) {
+  document.querySelectorAll('#mcpList .mcp-server.team').forEach(c => { delete mcpState[c.dataset.uid]; c.remove(); });
+  const first = $('mcpList').firstChild;
+  (m.servers || []).forEach(ts => {
+    const own = mcpUserTeam.find(u => u.Name.toLowerCase() === ts.Name.toLowerCase()) || {};
+    $('mcpList').insertBefore(mcpCard({
+      Name: ts.Name, Url: ts.Url, TimeoutSeconds: ts.TimeoutSeconds, WindowsLogin: ts.WindowsLogin, Headers: own.Headers || '',
+      Enabled: own.Name ? own.Enabled !== false : ts.Enabled !== false, Tools: own.Tools || {},
+    }, ts), first);
+  });
+  $('mcpTeamInfo').textContent = m.info || '';
+  mcpTeamLoaded = true;
+}
+function mcpCard(s, team) {
+  const uid = 'm' + (++mcpUid);
+  mcpState[uid] = { tools: null, saved: Object.assign({}, s.Tools || {}), team };
+  const card = el('div', 'mcp-server' + (team ? ' team' : ''));
+  card.dataset.uid = uid;
+  const teamHeaders = team && team.HeaderNames && team.HeaderNames.length ? ' ' + t('Headers of the team configuration: {0}.', team.HeaderNames.join(', ')) : '';
+  card.innerHTML =
+    '<div class="row"><label><input type="checkbox" class="mcp-enabled"> ' + esc(t('Enabled')) + '</label>' +
+    '<input class="mcp-name" placeholder="' + esc(t('Name, e.g. tickets')) + '" style="max-width:200px">' +
+    (team ? '<span class="badge" title="' + esc(t('From the team configuration')) + '">' + esc(t('Team')) + '</span>' : '') +
+    '<span style="flex:1"></span><button class="mcp-test">' + esc(t('Test')) + '</button>' +
+    (team ? '' : '<button class="mcp-remove" title="' + esc(t('Remove this server')) + '">' + esc(t('Remove')) + '</button>') + '</div>' +
+    '<div class="row"><input class="mcp-url" placeholder="http://server:8000/mcp"></div>' +
+    '<div class="lbl">' + esc(team ? t('Your own HTTP headers, one per line; a header with the same name replaces the one of the team (e.g. your token). Stored encrypted for your Windows user.') + teamHeaders
+                             : t('HTTP headers, one per line (e.g. Authorization: Bearer …). Stored encrypted for your Windows user.')) + '</div>' +
+    '<textarea class="mcp-headers secret" rows="2" spellcheck="false" placeholder="Authorization: Bearer …"></textarea>' +
+    '<div class="row"><span class="small">' + esc(t('Timeout (s)')) + '</span><input class="mcp-timeout" type="number" min="10" max="3600">' +
+    '<label title="' + esc(t('Only for servers that require Windows authentication (NTLM/Kerberos).')) + '"><input type="checkbox" class="mcp-winlogin"> ' + esc(t('Send Windows login')) + '</label></div>' +
+    '<div class="mcp-status"></div><div class="mcp-offers"></div><div class="mcp-tools"></div>';
+  const q = c => card.querySelector(c);
+  q('.mcp-enabled').checked = s.Enabled !== false;
+  q('.mcp-name').value = s.Name || '';
+  q('.mcp-url').value = s.Url || '';
+  q('.mcp-headers').value = s.Headers || '';
+  q('.mcp-timeout').value = s.TimeoutSeconds || 300;
+  q('.mcp-winlogin').checked = !!s.WindowsLogin;
+  if (team) ['.mcp-name', '.mcp-url', '.mcp-timeout', '.mcp-winlogin'].forEach(c => { q(c).disabled = true; q(c).title = t('Set in the team configuration'); });
+  q('.mcp-test').onclick = () => {
+    setMcpStatus(card, t('Testing…'), '');
+    send({ type: 'mcp_test', uid, server: readMcpCard(card, true), config: readSettings() });
+  };
+  if (!team) q('.mcp-remove').onclick = () => { card.remove(); delete mcpState[uid]; };
+  if (s.Name && s.Url) setMcpStatus(card, s.Enabled === false ? t('Disabled: the agent does not use this server.') : t('Not connected yet. Use Test to check the connection and list the tools.'), '');
+  renderMcpTools(card);
+  return card;
+}
+function setMcpStatus(card, text, cls) {
+  const st = card.querySelector('.mcp-status');
+  st.textContent = text;
+  st.className = 'mcp-status' + (cls ? ' ' + cls : '');
+}
+/** The mode of a tool without the user's choice: the team's, otherwise the server's hint. */
+function mcpDefaultMode(st, tl) {
+  return (st.team && st.team.Tools && st.team.Tools[tl.name]) || tl.defaultMode || 'write';
+}
+function renderMcpTools(card) {
+  const st = mcpState[card.dataset.uid]; if (!st) return;
+  const box = card.querySelector('.mcp-tools');
+  const current = {};
+  box.querySelectorAll('.trow').forEach(r => { current[r.dataset.tool] = r.querySelector('select').value; });
+  const known = Object.assign({}, (st.team && st.team.Tools) || {}, st.saved);
+  const list = st.tools || Object.keys(known).map(n => ({ name: n }));
+  if (!list.length) { box.innerHTML = ''; return; }
+  box.innerHTML = list.map(tl => {
+    const mode = current[tl.name] || st.saved[tl.name] || mcpDefaultMode(st, tl);
+    return '<div class="trow" data-tool="' + esc(tl.name) + '"><div class="tn"><b>' + esc(tl.name) + '</b>' +
+      (tl.description ? '<div title="' + esc(tl.description) + '">' + esc(tl.description) + '</div>' : '') + '</div><select>' +
+      MCP_MODES.map(([v, l]) => '<option value="' + v + '"' + (v === mode ? ' selected' : '') + '>' + esc(t(l)) + '</option>').join('') + '</select></div>';
+  }).join('');
+}
+/**
+ * The settings of a card. Team servers: only what the user changed (enabled, own headers, tool modes that differ from
+ * the team's); null if nothing differs. forTest: always the entry (the test merges it with the team file).
+ */
+function readMcpCard(card, forTest) {
+  const q = c => card.querySelector(c);
+  const st = mcpState[card.dataset.uid] || { saved: {} };
+  const tools = {};
+  card.querySelectorAll('.mcp-tools .trow').forEach(r => {
+    const v = r.querySelector('select').value;
+    if (!st.team || v !== mcpDefaultMode(st, (st.tools || []).find(x => x.name === r.dataset.tool) || { name: r.dataset.tool })) tools[r.dataset.tool] = v;
+  });
+  if (st.team) {
+    const entry = { Name: st.team.Name, Team: true, Enabled: q('.mcp-enabled').checked, Headers: q('.mcp-headers').value, Tools: tools };
+    const changed = entry.Enabled !== (st.team.Enabled !== false) || entry.Headers.trim() || Object.keys(tools).length;
+    return changed || forTest ? entry : null;
+  }
+  return {
+    Name: q('.mcp-name').value.trim(), Url: q('.mcp-url').value.trim(), Enabled: q('.mcp-enabled').checked,
+    Headers: q('.mcp-headers').value, TimeoutSeconds: +q('.mcp-timeout').value || 300, WindowsLogin: q('.mcp-winlogin').checked, Tools: tools,
+  };
+}
+function readMcpServers() {
+  const list = [...document.querySelectorAll('#mcpList .mcp-server')].map(c => readMcpCard(c, false)).filter(x => x);
+  // the team configuration is not read yet (slow network share): keep the user's settings for team servers
+  return mcpTeamLoaded ? list : list.concat(mcpUserTeam);
+}
+/** An own server must not use the name of a team server (null = fine). */
+function mcpNameProblem() {
+  const team = [...document.querySelectorAll('#mcpList .mcp-server.team .mcp-name')].map(i => i.value.trim().toLowerCase());
+  const clash = [...document.querySelectorAll('#mcpList .mcp-server:not(.team) .mcp-name')].map(i => i.value.trim()).find(n => team.includes(n.toLowerCase()));
+  return clash ? t('The team configuration already has a server named {0}: choose another name.', clash) : null;
+}
+function mcpCardByName(name) {
+  return [...document.querySelectorAll('#mcpList .mcp-server')].find(c => c.querySelector('.mcp-name').value.trim().toLowerCase() === String(name || '').toLowerCase());
+}
+function mcpConnectedText(m) {
+  const n = (m.tools || []).length;
+  return '✔ ' + t('Connected: {0} ({1}, protocol {2}), {3} tool(s)', m.server || '?', m.transport || '?', m.protocol || '?', n) + (n ? '' : ' ' + t('The server sent no tools.'));
+}
+/** The prompts (slash commands) and resources (@server:…) a server offers. */
+function mcpOffers(card, m) {
+  const name = card.querySelector('.mcp-name').value.trim().toLowerCase() || 'test';
+  const lines = [];
+  if ((m.prompts || []).length) lines.push(t('Commands: {0}', m.prompts.map(p => '/' + p).join(', ')));
+  const templates = m.templates || [];
+  if (m.resources || templates.length)
+    lines.push(t('Resources: attach with @{0}:… ({1} resource(s){2})', name, m.resources || 0, templates.length ? ', ' + templates.map(x => '@' + name + ':' + x).join(', ') : ''));
+  card.querySelector('.mcp-offers').textContent = lines.join('\n');
+}
+function mcpStatus(servers) {
+  (servers || []).forEach(s => {
+    const card = mcpCardByName(s.name); if (!card || !card.querySelector('.mcp-enabled').checked) return;
+    if (s.tools) { mcpState[card.dataset.uid].tools = s.tools; renderMcpTools(card); setMcpStatus(card, mcpConnectedText(s), 'ok'); mcpOffers(card, s); }
+    else if (s.error) setMcpStatus(card, '✖ ' + t('Not connected: {0}', s.error), 'bad');
+    else if (s.connecting) setMcpStatus(card, t('Connecting…'), '');
+  });
+}
+function mcpTestResult(m) {
+  const card = document.querySelector('#mcpList .mcp-server[data-uid="' + m.uid + '"]'); if (!card) return;
+  if (!m.ok) { setMcpStatus(card, '✖ ' + m.error, 'bad'); card.querySelector('.mcp-offers').textContent = ''; return; }
+  mcpState[m.uid].tools = m.tools || [];
+  renderMcpTools(card);
+  setMcpStatus(card, mcpConnectedText(m), 'ok');
+  mcpOffers(card, m);
+}
+$('btnAddMcp').onclick = () => {
+  const card = mcpCard({ Enabled: true, TimeoutSeconds: 300, Tools: {} }, null);
+  $('mcpList').appendChild(card);
+  card.querySelector('.mcp-name').focus();
+};
+$('btnBrowseMcp').onclick = () => send({ type: 'browse_mcp_config', current: $('McpConfigPath').value });
+$('McpConfigPath').addEventListener('change', () => { $('mcpTeamInfo').textContent = t('Reading the team configuration…'); send({ type: 'mcp_team', path: $('McpConfigPath').value }); });
 $('btnCancelSettings').onclick = closeSettings;
 $('btnCloseSettings').onclick = closeSettings;
-$('btnSaveSettings').onclick = () => send({ type: 'save_settings', config: readSettings() });
+$('btnSaveSettings').onclick = () => {
+  const problem = mcpNameProblem();
+  if (problem) { $('mcpError').textContent = problem; $('mcpError').scrollIntoView({ block: 'nearest' }); return; }
+  send({ type: 'save_settings', config: readSettings() });
+};
 // the context window belongs to the model: ask the server when another one is chosen
 $('Model').addEventListener('change', () => { if ($('Model').value.trim()) send({ type: 'detect_context', config: readSettings() }); });
 function showContext(c) {
@@ -1615,7 +1844,15 @@ function onHost(m) {
       setModel(m.model);
       if (m.lang && m.lang !== lang) setLang(m.lang);
       break;
-    case 'settings_error': $('testResult').textContent = m.text; $('testResult').style.color = 'var(--error)'; break;
+    case 'settings_error':
+      if (m.section === 'mcp') { $('mcpError').textContent = m.text; $('mcpError').scrollIntoView({ block: 'nearest' }); }
+      else { $('testResult').textContent = m.text; $('testResult').style.color = 'var(--error)'; }
+      break;
+    case 'mcp_status': mcpStatus(m.servers); break;
+    case 'mcp_test_result': mcpTestResult(m); break;
+    case 'mcp_team': renderMcpTeam(m); break;
+    case 'mcp_config_path': $('McpConfigPath').value = m.path; break;
+    case 'commands': commands = m.items || []; break;
     case 'test_result': {
       const r = $('testResult');
       if (m.ok) {
@@ -1635,7 +1872,7 @@ function onHost(m) {
     case 'replay': replay(m.events || []); break;
     case 'mention_results':
       if (pop.pendingQ === m.q && document.activeElement === inputEl)
-        showPopup('mention', (m.items || []).map(it => ({ label: it.label, detail: it.detail, insert: it.insert })), pop.pendingStart, m.q);
+        showPopup('mention', (m.items || []).map(it => ({ label: it.label, detail: it.detail, insert: it.insert, partial: !!it.partial })), pop.pendingStart, m.q);
       break;
   }
 }

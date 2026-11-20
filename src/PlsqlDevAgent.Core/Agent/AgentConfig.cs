@@ -2,8 +2,11 @@ using System;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using PlsqlDevAgent.Agent.Mcp;
 
 namespace PlsqlDevAgent.Agent
 {
@@ -63,6 +66,13 @@ namespace PlsqlDevAgent.Agent
         public string WorkspaceDir { get; set; } = "";
         /// <summary>Own quick commands, one per line: "/name = prompt" ($ARGUMENTS = text after the command).</summary>
         public string CustomCommands { get; set; } = "";
+        /// <summary>
+        /// External tools: the user's own MCP servers reached over HTTP, and the user's settings for servers of the team
+        /// configuration (entries with Team = true).
+        /// </summary>
+        public List<McpServerConfig> McpServers { get; set; } = new List<McpServerConfig>();
+        /// <summary>Team MCP configuration: an mcp.json file or a folder containing one (e.g. a network share, %VARIABLES% allowed).</summary>
+        public string McpConfigPath { get; set; } = "";
         /// <summary>Context window of the model in tokens (for the meter and automatic compaction).</summary>
         public int ContextWindowTokens { get; set; } = 131072;
         /// <summary>Ask the server for the model's context window (Test, model change, first answer) and set ContextWindowTokens.</summary>
@@ -174,6 +184,7 @@ namespace PlsqlDevAgent.Agent
             var o = JObject.FromObject(this);
             o.Remove("ApiKeyProtected");
             o["ApiKey"] = ApiKey ?? "";
+            o["McpServers"] = new JArray((McpServers ?? new List<McpServerConfig>()).Select(s => s.ToUiJson()));
             return o;
         }
 
@@ -181,11 +192,15 @@ namespace PlsqlDevAgent.Agent
         {
             var apiKey = (string)o["ApiKey"];
             o.Remove("ApiKey");
+            // lists would be appended to by PopulateObject: replaced as a whole (with the plain header values)
+            var servers = o["McpServers"] as JArray;
+            o.Remove("McpServers");
             JsonConvert.PopulateObject(o.ToString(), this);
             ApiKey = apiKey ?? "";
+            if (servers != null) McpServers = servers.OfType<JObject>().Select(McpServerConfig.FromUiJson).ToList();
         }
 
-        private static string Protect(string plain)
+        internal static string Protect(string plain)
         {
             if (string.IsNullOrEmpty(plain)) return "";
             try
@@ -199,7 +214,7 @@ namespace PlsqlDevAgent.Agent
             }
         }
 
-        private static string Unprotect(string stored)
+        internal static string Unprotect(string stored)
         {
             if (string.IsNullOrEmpty(stored)) return "";
             try

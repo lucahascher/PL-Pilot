@@ -18,7 +18,7 @@ namespace PlsqlDevAgent.Agent
 - To change code in the active editor use edit_editor: old_string must be copied exactly from the current editor text (without line number prefixes) and be unique; keep edits small and targeted. Use set_editor_text only for an empty editor or a complete rewrite. If an edit fails because the text was not found, read the editor again.
 - Editor changes are not in the database until compiled. When the user wants the change in the database (or asks you to fix compile errors), compile with compile_plsql using the complete CREATE OR REPLACE source, then read the reported errors, fix them and compile again until it is clean.
 - To work on a stored object that is not open, use open_object (it becomes the active editor) or get_object_source.
-- Use run_query only for read-only SELECTs and keep result sets small (WHERE conditions, FETCH FIRST n ROWS ONLY). Use execute_sql for DML, DDL and anonymous blocks.
+- Use run_query only for read-only SELECTs on data and the data dictionary and keep those result sets small (WHERE conditions, FETCH FIRST n ROWS ONLY); read source code with get_object_source, not with run_query. Use execute_sql for DML, DDL and anonymous blocks.
 - Every change (editor edits, compiling, executing statements, writing files) is shown to the user for approval. If the user rejects an action, do not retry the same thing; take the feedback into account or ask.
 - Never COMMIT, DROP, TRUNCATE, DELETE or otherwise destroy data or objects unless the user explicitly asked for exactly that. Never change objects in schemas the user did not mention.
 - Keep the existing code style: indentation, upper/lower case of keywords, naming conventions, comment language and header comments. Do not reformat code you were not asked to change.
@@ -51,6 +51,7 @@ namespace PlsqlDevAgent.Agent
 - Keep working until all tasks are completed. Do not stop to ask whether you should continue; only stop early when you are blocked or need a decision from the user, and then say clearly what you need.
 - For broad investigations (many objects or files) use run_subtask: a helper agent researches with its own context and returns a report, which keeps this conversation small. Several run_subtask calls in the same response run in parallel, so split broad research into a few focused, independent sub-tasks and request them together.
 - When you need several independent lookups (e.g. describe three tables), request all of these tool calls in one response instead of one per response: every response is a slow round trip to the model.
+- Read stored PL/SQL source with get_object_source: the whole unit in one call, or for a very large unit whole subprograms or large line ranges with start_line / end_line (e.g. from a search_source hit to the end of that subprogram). Never read source with run_query on ALL_SOURCE / DBA_SOURCE / USER_SOURCE, and never a few lines per call.
 - In PLAN MODE (shown in <ide_context>) you must not change anything: investigate with the read-only tools, then present a concrete numbered plan, record it with update_tasks (all tasks pending) and ask the user to approve it.";
 
         /// <summary>
@@ -58,7 +59,7 @@ namespace PlsqlDevAgent.Agent
         /// The system prompt is kept stable for the whole conversation (so the LLM server can reuse its
         /// prompt cache); the changing IDE state is sent with every user message instead.
         /// </summary>
-        public static string Build(AgentConfig cfg, bool hasFileTools, DatabaseInfo database = null)
+        public static string Build(AgentConfig cfg, bool hasFileTools, DatabaseInfo database = null, string mcpSection = null)
         {
             var sb = new StringBuilder();
             sb.Append(string.IsNullOrWhiteSpace(cfg.SystemPromptOverride) ? DefaultBasePrompt : cfg.SystemPromptOverride.Trim());
@@ -67,6 +68,7 @@ namespace PlsqlDevAgent.Agent
             if (!hasFileTools)
                 sb.Append("\nNo project folder is configured, so file tools are not available.\n");
             if (database != null) sb.Append('\n').Append(database.PromptSection());
+            if (!string.IsNullOrWhiteSpace(mcpSection)) sb.Append('\n').Append(mcpSection.TrimEnd()).Append('\n');
 
             var rules = RulesLoader.Load(cfg).Where(r => !string.IsNullOrWhiteSpace(r.Text)).ToList();
             if (rules.Count > 0)
@@ -86,7 +88,7 @@ namespace PlsqlDevAgent.Agent
         }
 
         /// <summary>System prompt of a helper agent (run_subtask).</summary>
-        public static string BuildSubtask(AgentConfig cfg, DatabaseInfo database = null)
+        public static string BuildSubtask(AgentConfig cfg, DatabaseInfo database = null, string mcpSection = null)
         {
             var sb = new StringBuilder(
                 "You are a research helper of an AI coding agent that works inside PL/SQL Developer (Oracle). You get one task. " +
@@ -96,12 +98,15 @@ namespace PlsqlDevAgent.Agent
                 "Do not invent facts. Your report is passed back to the agent, not shown to the user.\n" +
                 "Work fast: every response of yours is a slow round trip to the model. Request all independent tool calls you " +
                 "need next in ONE response (e.g. describe_object for three tables at once, or several search_source calls), " +
+                "read source with get_object_source (whole units or large line ranges, never with run_query on ALL_SOURCE / DBA_SOURCE " +
+                "and never a few lines per call), " +
                 "prefer one targeted dictionary query over many small ones, and write the report as soon as you can answer " +
                 "the task. Keep the report short; quote only the code lines that matter.\n" +
                 "Unqualified names refer to the current schema given in the context (the user's schema); qualify objects of other " +
                 "schemas (OWNER.NAME). Other helpers may work in parallel in the same database session.\n");
             if (cfg.UseDbaViews) sb.Append(DbaViews.PromptRule).Append('\n');
             if (database != null) sb.Append('\n').Append(database.PromptSection());
+            if (!string.IsNullOrWhiteSpace(mcpSection)) sb.Append('\n').Append(mcpSection.TrimEnd()).Append('\n');
             if (!string.IsNullOrWhiteSpace(cfg.ExtraInstructions))
                 sb.Append("\nProject conventions:\n").Append(cfg.ExtraInstructions.Trim()).Append('\n');
             return sb.ToString();

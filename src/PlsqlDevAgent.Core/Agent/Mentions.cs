@@ -12,7 +12,8 @@ namespace PlsqlDevAgent.Agent
 {
     /// <summary>
     /// @-mentions in the prompt: "@EMP_API", "@SCOTT.EMP" or "@sql/pkg_orders.pkb" attach the object's source /
-    /// description or the file's content to the message, so the model does not have to look them up.
+    /// description or the file's content to the message, so the model does not have to look them up; "@server:name"
+    /// attaches a resource of an MCP server.
     /// </summary>
     public static class Mentions
     {
@@ -29,15 +30,61 @@ namespace PlsqlDevAgent.Agent
         public static List<string> Parse(string text) =>
             MentionRegex.Matches(text ?? "").Cast<Match>().Select(m => m.Groups["m"].Value.TrimEnd('.')).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
+        // "@server:reference": a resource of an MCP server (only for configured servers; otherwise "@name" as before)
+        private static readonly Regex McpMentionRegex = new Regex(@"(?<![\w@])@(?<s>[A-Za-z][A-Za-z0-9_-]{0,23}):(?<r>[^\s]+)", RegexOptions.Compiled);
+
+        /// <summary>The "@server:reference" mentions of configured MCP servers, and the text without them.</summary>
+        public static List<(string Server, string Reference)> ParseMcp(string text, Func<string, bool> isServer, out string rest)
+        {
+            var list = new List<(string, string)>();
+            var sb = new StringBuilder(text ?? "");
+            foreach (var m in McpMentionRegex.Matches(text ?? "").Cast<Match>().Reverse()) // from the end: earlier indexes stay valid
+            {
+                if (!isServer(m.Groups["s"].Value)) continue;
+                var reference = m.Groups["r"].Value.TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '"', '\'');
+                if (reference.Length == 0) continue;
+                list.Insert(0, (m.Groups["s"].Value, reference));
+                sb.Remove(m.Index, m.Length).Insert(m.Index, " ");
+            }
+            rest = sb.ToString();
+            return list.Distinct().ToList();
+        }
+
         /// <summary>Builds the attachment block for the LLM and a list of chips for the UI.</summary>
         public static async Task<(string Text, JArray Items)> ResolveAsync(string text, ToolContext ctx)
         {
+            var mcp = new List<(string Server, string Reference)>();
+            if (ctx.Mcp != null)
+            {
+                mcp = ParseMcp(text, ctx.Mcp.IsServer, out var rest);
+                text = rest;
+            }
             var mentions = Parse(text);
             var items = new JArray();
-            if (mentions.Count == 0) return ("", items);
+            if (mentions.Count == 0 && mcp.Count == 0) return ("", items);
 
             var sb = new StringBuilder("\n\n<attachments>\n");
             int budget = ctx.Config.MaxToolOutputChars * 3;
+            foreach (var (server, reference) in mcp.Take(10))
+            {
+                var label = server + ":" + reference;
+                try
+                {
+                    var (uri, content) = await ctx.Mcp.ReadMentionAsync(server, reference, ctx.Cancellation).ConfigureAwait(false);
+                    content = Db.Truncate(content.Replace("\r\n", "\n").TrimEnd(), Math.Max(2000, Math.Min(ctx.Config.MaxToolOutputChars, budget)));
+                    budget -= content.Length;
+                    items.Add(new JObject { ["label"] = label, ["ok"] = true, ["detail"] = Util.L.T("{0}, {1} lines", Util.L.T("MCP resource"), content.Split('\n').Length) });
+                    sb.Append($"<attachment name=\"{label}\" kind=\"MCP resource\">\n{Mcp.McpTool.WrapExternal(server, "resource", uri, content)}\n</attachment>\n");
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    var message = ex.GetBaseException().Message;
+                    Util.Log.Warn($"Resolving @{label} failed: {message}");
+                    items.Add(new JObject { ["label"] = "@" + label, ["ok"] = false, ["detail"] = message.Length > 120 ? message.Substring(0, 117) + "…" : message });
+                    sb.Append($"<attachment name=\"{label}\">(could not be read: {message})</attachment>\n");
+                }
+            }
             foreach (var mention in mentions.Take(10))
             {
                 string kind = null, label = mention, content = null;
@@ -103,6 +150,11 @@ namespace PlsqlDevAgent.Agent
         {
             var items = new JArray();
             query = (query ?? "").Trim();
+            // resources of MCP servers ("@server:…"), from the server's list in memory: no network access
+            var mcp = ctx.Mcp?.SuggestMentions(query) ?? new JArray();
+            int colon = query.IndexOf(':');
+            if (colon > 0 && ctx.Mcp != null && ctx.Mcp.IsServer(query.Substring(0, colon))) return mcp;
+            foreach (var item in mcp) items.Add(item);
             try
             {
                 // setting off: no database traffic while the user types (workspace files are still suggested)

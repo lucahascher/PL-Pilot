@@ -149,9 +149,14 @@ namespace PlsqlDevAgent.Agent
         public string Name;
         public string Description;
         public string Prompt;
-        /// <summary>"prompt" = sent to the LLM, "action" = handled by the plug-in (new, compact, help).</summary>
+        /// <summary>
+        /// "prompt" = sent to the LLM, "action" = handled by the plug-in (new, compact, help), "mcp" = a prompt of an MCP
+        /// server (/server:prompt), filled in by the server before it is sent.
+        /// </summary>
         public string Kind = "prompt";
         public string Source = "built-in";
+        /// <summary>For Kind "mcp": the server and the name of its prompt.</summary>
+        public string McpServer, McpPrompt;
     }
 
     public static class Commands
@@ -186,9 +191,11 @@ namespace PlsqlDevAgent.Agent
             new ChatCommand { Name = "help", Description = "List the available commands", Kind = "action" },
         };
 
-        public static List<ChatCommand> All(AgentConfig cfg)
+        /// <summary>Built-in, own (settings, project) and <paramref name="extra"/> commands (the prompts of MCP servers).</summary>
+        public static List<ChatCommand> All(AgentConfig cfg, IEnumerable<ChatCommand> extra = null)
         {
             var result = new List<ChatCommand>(BuiltIn);
+            foreach (var c in extra ?? Enumerable.Empty<ChatCommand>()) Add(result, c);
             foreach (var line in (cfg.CustomCommands ?? "").Split('\n'))
             {
                 var m = System.Text.RegularExpressions.Regex.Match(line, @"^\s*/?([\w-]+)\s*[=:]\s*(.+?)\s*$");
@@ -221,13 +228,13 @@ namespace PlsqlDevAgent.Agent
             return result;
         }
 
-        /// <summary>"/review focus on exceptions" → the command and its arguments.</summary>
-        public static ChatCommand Find(string text, AgentConfig cfg, out string args)
+        /// <summary>"/review focus on exceptions" → the command and its arguments ("/server:prompt …" for MCP prompts).</summary>
+        public static ChatCommand Find(string text, AgentConfig cfg, out string args, IEnumerable<ChatCommand> extra = null)
         {
             args = null;
-            var m = System.Text.RegularExpressions.Regex.Match(text ?? "", @"^\s*/([\w-]+)(?:\s+([\s\S]*))?$");
+            var m = System.Text.RegularExpressions.Regex.Match(text ?? "", @"^\s*/([\w-]+(?::[\w.-]+)?)(?:\s+([\s\S]*))?$");
             if (!m.Success) return null;
-            var cmd = All(cfg).FirstOrDefault(c => c.Name.Equals(m.Groups[1].Value, StringComparison.OrdinalIgnoreCase));
+            var cmd = All(cfg, extra).FirstOrDefault(c => c.Name.Equals(m.Groups[1].Value, StringComparison.OrdinalIgnoreCase));
             if (cmd != null) args = m.Groups[2].Success ? m.Groups[2].Value.Trim() : "";
             return cmd;
         }

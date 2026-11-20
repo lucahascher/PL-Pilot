@@ -114,6 +114,53 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
   `SELECT_CATALOG_ROLE`; ohne sie werden automatisch die `ALL_`-Views verwendet.
 - Das Passwort der Verbindung wird nie gelesen.
 
+## Externe Systeme (MCP-Server)
+
+Über **Einstellungen → Externe Tools (MCP)** kann PL/Pilot andere Systeme nutzen, z. B. das Ticketsystem oder die
+Versionsverwaltung. Der Agent liest dann etwa zuerst das Ticket und die zugehörigen Commits und geht danach in die
+Packages.
+
+1. **MCP-Server hinzufügen**, einen kurzen **Namen** eintragen (z. B. `tickets`; er wird den Tool-Namen
+   vorangestellt: `tickets__get_ticket`) und die **URL**, meist `http://server:port/mcp` (ältere Server: `…/sse`).
+2. Falls nötig **HTTP-Header** eintragen, z. B. `Authorization: Bearer <Token>` (verschlüsselt gespeichert).
+3. **Testen** verbindet sich und zeigt die Tools. Für jedes Tool festlegen: **Lesen** (läuft ohne Rückfrage),
+   **Ändert Daten** (fragt vorher) oder **Aus**. Vorgabe ist, was der Server selbst angibt.
+4. **Speichern.**
+
+Gut zu wissen:
+
+- Das Plug-in startet keine Programme: Der MCP-Server muss per HTTP erreichbar sein (z. B. auf einem Teamserver).
+- Tools, die Daten ändern, stehen im Planmodus, im Nur-Lesen-Modus und auf geschützten Verbindungen nicht zur
+  Verfügung. Als destruktiv gekennzeichnete Tools fragen immer nach.
+- Antworten aus dem externen System (Tickettexte, Kommentare, Commit-Nachrichten) behandelt der Agent als Daten,
+  nicht als Anweisungen. Ihre Zustimmung für Änderungen an der Datenbank bleibt in jedem Fall nötig.
+- Server, die selbst ein Sprachmodell nutzen, sind oft langsam: Pro Aufruf wartet PL/Pilot bis zu 300 s
+  (**Zeitlimit**); Fortschrittsmeldungen des Servers erscheinen unter dem Tool-Aufruf.
+- Ist ein Server nicht erreichbar, erscheint ein Hinweis und der Agent arbeitet ohne seine Tools weiter.
+
+**Prompts und Ressourcen eines Servers** (zeigt **Testen** ebenfalls an):
+
+- Prompts erscheinen als Befehle `/server:prompt`, z. B. `/tickets:review_ticket PLS-101 Namenskonventionen`.
+  Die Werte werden in der Reihenfolge der Argumente angegeben (der letzte nimmt den Rest des Textes) oder als
+  `name=wert`. Der Server füllt den Prompt aus; das Ergebnis wird Ihre Nachricht an den Agent.
+- Ressourcen hängen Sie mit `@server:name` an, z. B. `@tickets:PLS-101` oder `@tickets:ticket/PLS-101`. Beim
+  Tippen nach `@` werden die Ressourcen des Servers vorgeschlagen.
+
+**Team-Konfiguration:** Eine `mcp.json` für das ganze Team – neben dem Plug-in (`PlugIns\PlsqlDevAgent\mcp.json`)
+und/oder unter **Team-Konfiguration** (Datei oder Ordner, z. B. auf dem Netzlaufwerk). Format wie bei anderen
+MCP-Clients:
+
+```json
+{ "mcpServers": { "tickets": { "url": "http://server:8000/mcp",
+                               "headers": { "Authorization": "Bearer ${env:TICKETS_TOKEN}" },
+                               "tools": { "ask": "read" } } } }
+```
+
+Team-Server erscheinen in den Einstellungen mit dem Kennzeichen **Team**. Sie können sie ausschalten, eigene Header
+ergänzen (z. B. Ihr persönliches Token; ein Header mit gleichem Namen ersetzt den des Teams) und den Modus jedes Tools
+ändern. Gespeichert werden nur Ihre Abweichungen – spätere Änderungen der Team-Datei kommen also weiterhin an.
+Geheimnisse gehören nicht in die Datei: `${env:NAME}` liest eine Umgebungsvariable.
+
 ## Firmenregeln und Konventionen
 
 Unter **Einstellungen → Anweisungen & Regeln**:

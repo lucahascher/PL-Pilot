@@ -212,6 +212,62 @@ namespace PlsqlDevAgent.Util
             ["Regarding the active editor ({0}): "] = "Zum aktiven Editor ({0}): ",
             ["Regarding {0}: "] = "Zu {0}: ",
             [" from the {0} window"] = " aus dem {0}-Fenster",
+            // external tools (MCP)
+            ["MCP server name \"{0}\": use 1–24 letters, digits, _ or -, starting with a letter."] =
+                "Name des MCP-Servers „{0}“: 1–24 Buchstaben, Ziffern, _ oder -, beginnend mit einem Buchstaben.",
+            ["MCP server {0}: the URL must be an http(s) URL, e.g. http://server:8000/mcp"] = "MCP-Server {0}: Die URL muss eine http(s)-URL sein, z. B. http://server:8000/mcp",
+            ["MCP server {0}: every header line must look like \"Name: value\"."] = "MCP-Server {0}: Jede Header-Zeile muss die Form „Name: Wert“ haben.",
+            ["Two MCP servers are named {0}: the names must be different."] = "Zwei MCP-Server heißen {0}: Die Namen müssen verschieden sein.",
+            ["MCP server {0}: {1}"] = "MCP-Server {0}: {1}",
+            ["MCP server {0} rejected the connection ({1}). Check the URL: it is usually the server address followed by /mcp (or /sse for older servers)."] =
+                "MCP-Server {0} hat die Verbindung abgelehnt ({1}). Prüfen Sie die URL: meist die Serveradresse gefolgt von /mcp (bei älteren Servern /sse).",
+            ["MCP server {0} did not answer {1} within {2} s."] = "MCP-Server {0} hat {1} nicht innerhalb von {2} s beantwortet.",
+            ["MCP server {0} refused access (HTTP {1}). Check the headers (e.g. Authorization) in the settings."] =
+                "MCP-Server {0} verweigert den Zugriff (HTTP {1}). Prüfen Sie die Header (z. B. Authorization) in den Einstellungen.",
+            ["MCP server {0} answered with HTTP {1} {2}"] = "MCP-Server {0} antwortete mit HTTP {1} {2}",
+            ["MCP server {0} closed the connection without an answer."] = "MCP-Server {0} hat die Verbindung ohne Antwort geschlossen.",
+            ["MCP server {0} sent an invalid answer: {1}"] = "MCP-Server {0} hat eine ungültige Antwort gesendet: {1}",
+            ["The connection to MCP server {0} was interrupted while waiting for the answer: {1}"] = "Die Verbindung zu MCP-Server {0} wurde beim Warten auf die Antwort unterbrochen: {1}",
+            ["MCP server {0} did not open its event stream."] = "MCP-Server {0} hat seinen Ereignisstrom nicht geöffnet.",
+            ["MCP server {0} did not send the endpoint event of the HTTP+SSE transport."] = "MCP-Server {0} hat das endpoint-Ereignis des HTTP+SSE-Transports nicht gesendet.",
+            ["MCP server {0} reported an error: {1}"] = "MCP-Server {0} meldet einen Fehler: {1}",
+            ["MCP server {0} did not answer within 45 s."] = "MCP-Server {0} hat nicht innerhalb von 45 s geantwortet.",
+            ["MCP server {0} is not available: {1} Its tools cannot be used for now."] = "MCP-Server {0} ist nicht verfügbar: {1} Seine Tools können vorerst nicht verwendet werden.",
+            ["MCP server {0} is not connected any more (settings changed or connection lost)."] = "MCP-Server {0} ist nicht mehr verbunden (Einstellungen geändert oder Verbindung verloren).",
+            ["Call {0} on {1} (changes data in the external system)"] = "{0} auf {1} aufrufen (ändert Daten im externen System)",
+            ["{0} marks this tool as destructive: it may delete or overwrite data there."] = "{0} kennzeichnet dieses Tool als destruktiv: Es kann dort Daten löschen oder überschreiben.",
+            ["{0} reported an error:"] = "{0} meldet einen Fehler:",
+            ["Timed out after 45 s."] = "Zeitüberschreitung nach 45 s.",
+            // team MCP configuration
+            ["{0}: not found"] = "{0}: nicht gefunden",
+            ["The team MCP configuration {0} was not found."] = "Die Team-MCP-Konfiguration {0} wurde nicht gefunden.",
+            ["{0}: none (optional)"] = "{0}: keine (optional)",
+            ["{0}: no \"mcpServers\" object"] = "{0}: kein \"mcpServers\"-Objekt",
+            ["{0}: {1} server(s)"] = "{0}: {1} Server",
+            ["skipped or incomplete: {0}"] = "übersprungen oder unvollständig: {0}",
+            ["{0}: cannot be read: {1}"] = "{0}: kann nicht gelesen werden: {1}",
+            ["The team MCP configuration could not be read: {0}"] = "Die Team-MCP-Konfiguration konnte nicht gelesen werden: {0}",
+            ["{0}: environment variable {1} is not set"] = "{0}: Umgebungsvariable {1} ist nicht gesetzt",
+            ["{0}: a program started by the client (stdio) – the plug-in only connects to HTTP servers"] =
+                "{0}: ein vom Client gestartetes Programm (stdio) – das Plug-in verbindet sich nur mit HTTP-Servern",
+            ["{0}: no url"] = "{0}: keine url",
+            ["Team MCP configuration (mcp.json)"] = "Team-MCP-Konfiguration (mcp.json)",
+            ["{0} is not in the team MCP configuration any more."] = "{0} ist nicht mehr in der Team-MCP-Konfiguration.",
+            // MCP prompts and resources
+            ["The MCP server {0} no longer offers the prompt {1}."] = "Der MCP-Server {0} bietet den Prompt {1} nicht mehr an.",
+            ["/{0} needs: {1}"] = "/{0} braucht: {1}",
+            ["(values in this order, or name=value)"] = "(Werte in dieser Reihenfolge oder name=wert)",
+            ["The prompt {0} of {1} returned no text."] = "Der Prompt {0} von {1} lieferte keinen Text.",
+            ["There is no command /{0}: the MCP server does not offer this prompt or is not connected."] =
+                "Es gibt keinen Befehl /{0}: Der MCP-Server bietet diesen Prompt nicht an oder ist nicht verbunden.",
+            ["{0} has no resource \"{1}\"."] = "{0} hat keine Ressource „{1}“.",
+            ["Available: {0}"] = "Verfügbar: {0}",
+            ["MCP server {0}: resources"] = "MCP-Server {0}: Ressourcen",
+            ["MCP resource"] = "MCP-Ressource",
+            ["Commands named `/server:prompt` are prompts of your MCP servers; `@server:name` attaches a resource of an MCP server."] =
+                "Befehle der Form `/server:prompt` sind Prompts Ihrer MCP-Server; `@server:name` hängt eine Ressource eines MCP-Servers an.",
+            ["Note: \"Auto approve SQL\" is on and MCP servers are connected. Text from external systems (e.g. a ticket) could make the agent run SQL without asking you. Consider turning auto approve off."] =
+                "Hinweis: „SQL automatisch zulassen“ ist an und MCP-Server sind verbunden. Text aus externen Systemen (z. B. ein Ticket) könnte den Agent dazu bringen, SQL ohne Rückfrage auszuführen. Erwägen Sie, das automatische Zulassen auszuschalten.",
         };
     }
 }
