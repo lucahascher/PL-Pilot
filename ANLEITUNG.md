@@ -27,6 +27,16 @@ Daten gehen nur an diesen Server. Diese Kurzanleitung richtet sich an Anwender; 
   Beim Testen (und beim Wechsel des Modells) fragt PL/Pilot den Server nach dem **Kontextfenster** des Modells
   und trägt es ein; bei Ollama wird es nach der ersten Antwort des Modells noch einmal geprüft. Wer einen eigenen
   Wert behalten will, schaltet **Kontextfenster ermitteln** aus.
+- Die **Größengrenzen** (ein Tool-Ergebnis, die Unterhaltung, ein Objekt-Dossier) wachsen mit dem Kontextfenster
+  (**Grenzen folgen dem Kontextfenster**). Bei einem Modell mit 1 Mio. Tokens kann ein Dossier mehrere große
+  Packages fassen; die Einstellungsseite zeigt die wirksamen Werte.
+- **Projektordner** (optional): der Ordner mit Ihren lokalen Quelldateien, die Sie in die Versionsverwaltung
+  einchecken – Unterordner (z. B. einer pro Schema) werden mit durchsucht. PL/Pilot merkt sich, welche Datei welches
+  Datenbankobjekt enthält (aus den `CREATE`-Anweisungen; das Schema steht dort oder ergibt sich aus einem Ordner mit
+  dem Namen des Schemas), und zeigt bei jedem Objekt, ob die lokale Datei dem Stand in der Datenbank entspricht.
+  Will der Agent zum ersten Mal in einem Chat ein Objekt ändern, das es auch lokal gibt, fragt PL/Pilot, wo
+  geändert werden soll: **Datenbank**, **Lokale Dateien** (der Agent ändert alle betroffenen Dateien und kompiliert
+  nicht) oder **Beides**. Die Wahl steht über dem Eingabefeld; ein Klick darauf, und Sie werden erneut gefragt.
 - **Sprache**: *Automatisch* übernimmt die Sprache von PL/SQL Developer bzw. Windows; *Deutsch* erzwingt Deutsch.
   Die Menüs von PL/SQL Developer wechseln nach einem Neustart.
 
@@ -38,7 +48,9 @@ Daten gehen nur an diesen Server. Diese Kurzanleitung richtet sich an Anwender; 
 | Zu markiertem Code fragen | Code markieren → **Zur Auswahl fragen** oder Rechtsklick im Editor → **PL/Pilot fragen** |
 | Zu einem Datenbankobjekt fragen | Rechtsklick im Objekt-Browser → **PL/Pilot zu diesem Objekt fragen** |
 | Befehle | `/` tippen: `/explain`, `/review`, `/document`, `/test`, `/optimize`, `/fix`, `/compact`, `/new`, `/help` |
-| Objekte oder Dateien anhängen | `@` tippen, z. B. `@PKG_AUFTRAG` – Quelltext bzw. Tabellenbeschreibung wird mitgeschickt. Die Vorschläge beim Tippen fragen die Datenbank ab; abschaltbar mit der Einstellung *Objekte nach @ vorschlagen* |
+| Objekte oder Dateien anhängen | `@` tippen, z. B. `@PKG_AUFTRAG @AUFTRAG` – für Datenbankobjekte wird ein Dossier mitgeschickt (Quelltext bzw. Tabellenstruktur, verwendete Tabellen und Packages, Aufrufer mit ihren Zeilen, Fremdschlüssel-Nachbarn). Die Vorschläge beim Tippen fragen die Datenbank ab; abschaltbar mit der Einstellung *Objekte nach @ vorschlagen* |
+| Aktives Fenster ausblenden | Über dem Eingabefeld steht das geöffnete Fenster. Der Agent weiß, dass es offen ist, liest es aber nur, wenn sich die Anfrage darauf bezieht. Ein Klick darauf streicht es durch: Dann sieht der Agent es nicht und darf es weder lesen noch ändern (gilt für dieses Fenster, bis Sie erneut klicken) |
+| Fortschritt verfolgen | Unter dem Eingabefeld steht, was der Agent gerade tut (wartet auf das Modell, denkt nach – mit seinem letzten Gedanken –, führt ein Tool aus, wartet auf Ihre Zustimmung) und wie lange schon, dazu Schritt, Gesamtzeit und erzeugte Tokens. Jeder Tool-Aufruf zeigt seine Dauer, jede Antwort endet mit Gesamtzeit, Modell-Durchläufen und Tool-Aufrufen |
 | Frühere Eingaben | `↑` / `↓` im leeren Eingabefeld |
 | Gespeicherte Chats | Uhr-Symbol im Chat-Kopf |
 
@@ -47,6 +59,13 @@ arbeitet sie selbstständig ab. Im **Plan-Modus** (Schalter *Agent / Plan* im Ei
 und schlägt einen Plan vor; **Plan ausführen** setzt ihn um. Für breite Recherchen startet er
 **Hilfsagenten** (`run_subtask`); mehrere davon laufen gleichzeitig. Unter **Einstellungen → Agent → Modell für
 Teilaufgaben** kann ein kleineres, schnelleres Modell für die Hilfsagenten eingetragen werden.
+
+**Arbeitsweise:** Der Agent arbeitet auf ein klares Ergebnis hin, in wenigen, großen Schritten: lieber ein breites
+Nachschlagen als viele kleine, vollständige Änderungen statt Zeile für Zeile, kurzes Nachdenken, nach zwei
+Fehlversuchen ein anderer Weg. In großen Datenbanken geht er von den genannten Objekten aus und folgt deren
+tatsächlichen Verweisen, sucht zuerst gezielt und liest dann nur die Treffer, nutzt die Namenskonventionen und
+schaut nur so weit, wie die Aufgabe es verlangt. Schlägt er zehnmal hintereinander nur nach, erinnert PL/Pilot ihn
+daran, zum Ergebnis zu kommen (als Hinweis im Chat sichtbar).
 
 **Zustimmungen:** Vor jeder Änderung erscheint eine Karte mit Diff bzw. SQL:
 **Zulassen**, **Immer zulassen** (für diesen Chat), **Diff öffnen** (Vergleichsfenster von PL/SQL Developer)
@@ -79,6 +98,11 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
   Debug-Informationen behält jede Einheit dabei. Abschaltbar unter **Einstellungen → Agent → Compiler-Warnungen**.
 - PL/Pilot kennt die **Oracle-Version** und die **NLS-Einstellungen** (z. B. Dezimalkomma) der Verbindung und
   schreibt Code passend dazu.
+- **Überblick in einem Schritt:** Mit `explore_objects` holt sich der Agent zu mehreren Objekten auf einmal ein
+  Dossier: vollständigen Quelltext bzw. Tabellenstruktur mit Kommentaren, Schlüsseln, Indizes und Triggern, die
+  verwendeten Tabellen und Packages, die Aufrufer mit den betreffenden Zeilen (schreibende Zeilen markiert) und die
+  Tabellen, die per Fremdschlüssel verbunden sind. Das spart in großen Datenbanken viele langsame Einzelschritte.
+  Tabelleninhalte werden dabei nicht gelesen.
 - **Große Packages** liest der Agent abschnittsweise: Ist eine Einheit zu lang für eine Antwort, sieht er eine
   Liste der übrigen Prozeduren und Funktionen mit Zeilennummern und liest gezielt weiter.
 - **Messen statt raten:** Bei Fragen wie „Ist diese Abfrage schneller?“ führt PL/Pilot beide Varianten aus,

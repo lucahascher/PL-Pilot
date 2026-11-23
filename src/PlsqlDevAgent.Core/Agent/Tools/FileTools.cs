@@ -183,7 +183,7 @@ namespace PlsqlDevAgent.Agent.Tools
             var body = Bool(args, "with_line_numbers", false)
                 ? TextEdit.WithLineNumbers(text, start, end)
                 : (start > 0 || end > 0 ? TextEdit.Lines(text, start, end) : text.Replace("\r\n", "\n"));
-            return Task.FromResult(Db.Truncate(body, ctx.Config.MaxToolOutputChars));
+            return Task.FromResult(Db.Truncate(body, ctx.Config.ToolOutputLimit));
         }
     }
 
@@ -246,7 +246,15 @@ namespace PlsqlDevAgent.Agent.Tools
             if (File.Exists(path)) before = TextFile.Read(path, out enc);
             if (before != null && before.Contains("\r\n")) content = content.Replace("\r\n", "\n").Replace("\n", "\r\n");
             else if (before == null) content = content.Replace("\r\n", "\n").Replace("\n", "\r\n");
-            return await EditFileTool.Commit(ctx, path, before, content, enc);
+            string note = null;
+            if (before != null)
+            {
+                bool proceed;
+                (proceed, note) = await LocalChanges.CheckFileAsync(ctx, path);
+                if (!proceed) return note;
+            }
+            var result = await EditFileTool.Commit(ctx, path, before, content, enc);
+            return note == null ? result : result.TrimEnd() + "\n\n" + note;
         }
     }
 
@@ -270,7 +278,10 @@ namespace PlsqlDevAgent.Agent.Tools
             if (!File.Exists(path)) return "File not found. Use write_file to create it.";
             var before = TextFile.Read(path, out var enc);
             var after = TextEdit.Apply(before, ReqStr(args, "old_string"), ReqStr(args, "new_string"), Bool(args, "replace_all", false));
-            return await Commit(ctx, path, before, after, enc);
+            var (proceed, note) = await LocalChanges.CheckFileAsync(ctx, path);
+            if (!proceed) return note;
+            var result = await Commit(ctx, path, before, after, enc);
+            return note == null ? result : result.TrimEnd() + "\n\n" + note;
         }
 
         internal static async Task<string> Commit(ToolContext ctx, string path, string before, string after, Encoding enc)

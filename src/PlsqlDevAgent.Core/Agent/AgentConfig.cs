@@ -58,6 +58,13 @@ namespace PlsqlDevAgent.Agent
         public int MaxToolOutputChars { get; set; } = 40000;
         /// <summary>Rough size budget of the conversation; older tool outputs are shortened above it.</summary>
         public int ContextBudgetChars { get; set; } = 300000;
+        /// <summary>
+        /// The size limits grow with the model's context window (<see cref="ToolOutputLimit"/>, <see cref="ContextBudgetLimit"/>,
+        /// <see cref="ExploreOutputLimit"/>); the configured values are the minimum. Off: exactly the configured values.
+        /// </summary>
+        public bool ScaleWithContextWindow { get; set; } = true;
+        /// <summary>Most characters of one object dossier (explore_objects, @mentions); 0 = automatic from the context window.</summary>
+        public int ExploreMaxChars { get; set; } = 0;
         public string ExtraInstructions { get; set; } = "";
         /// <summary>Replaces the built-in base system prompt (role, way of working, answer style); empty = default.</summary>
         public string SystemPromptOverride { get; set; } = "";
@@ -155,6 +162,41 @@ namespace PlsqlDevAgent.Agent
         }
 
         public bool HasWorkspace => !string.IsNullOrWhiteSpace(WorkspaceDir) && Directory.Exists(WorkspaceDir);
+
+        // ---- size limits derived from the context window ----
+
+        /// <summary>Characters per token assumed for the limits (measured about 2.8 for PL/SQL source; conservative).</summary>
+        private const double CharsPerToken = 2.8;
+
+        /// <summary>Share of the context window, in characters.</summary>
+        private int WindowChars(double share) => (int)Math.Min(int.MaxValue, Math.Max(0, ContextWindowTokens) * CharsPerToken * share);
+
+        /// <summary>
+        /// Most characters of one tool result: <see cref="MaxToolOutputChars"/>, with <see cref="ScaleWithContextWindow"/>
+        /// at least 5 % of the context window (at most 200,000). A 128k window keeps 40,000, a 1M window gets about 147,000.
+        /// </summary>
+        [JsonIgnore]
+        public int ToolOutputLimit => Math.Max(2000, ScaleWithContextWindow
+            ? Math.Max(MaxToolOutputChars, Math.Min(200000, WindowChars(0.05)))
+            : MaxToolOutputChars);
+
+        /// <summary>
+        /// Size of the conversation above which older tool outputs are shortened: <see cref="ContextBudgetChars"/>, with
+        /// <see cref="ScaleWithContextWindow"/> at least 65 % of the context window (below the compaction at 80 %).
+        /// </summary>
+        [JsonIgnore]
+        public int ContextBudgetLimit => Math.Max(20000, ScaleWithContextWindow
+            ? Math.Max(ContextBudgetChars, WindowChars(0.65))
+            : ContextBudgetChars);
+
+        /// <summary>
+        /// Most characters of one object dossier (explore_objects, @mentions): <see cref="ExploreMaxChars"/>, or
+        /// automatically 20 % of the context window (at most 400,000), never less than <see cref="ToolOutputLimit"/>.
+        /// </summary>
+        [JsonIgnore]
+        public int ExploreOutputLimit => ExploreMaxChars > 0
+            ? Math.Max(2000, ExploreMaxChars)
+            : Math.Max(ToolOutputLimit, ScaleWithContextWindow ? Math.Min(400000, WindowChars(0.20)) : 0);
 
         public static AgentConfig Load()
         {

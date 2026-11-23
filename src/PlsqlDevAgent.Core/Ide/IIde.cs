@@ -150,6 +150,13 @@ namespace PlsqlDevAgent.Ide
             return s;
         }
 
+        /// <summary>
+        /// Identifies the window by what it shows (type, object, file), e.g. to remember that the user excluded it from the
+        /// chat. Unsaved windows of the same type without an object share one key. Null if no editor window is active.
+        /// </summary>
+        public string WindowKey => WindowType == IdeWindowType.None ? null
+            : $"{WindowType}|{ObjectType}|{ObjectOwner}|{ObjectName}|{FileName}".ToUpperInvariant();
+
         public string WindowLabel
         {
             get

@@ -72,7 +72,7 @@ namespace PlsqlDevAgent.Agent.Tools
             {
                 return "Query failed: " + ex.Message;
             }
-            var text = FormatResult(r.Result, ctx.Config.MaxToolOutputChars);
+            var text = FormatResult(r.Result, ctx.Config.ToolOutputLimit);
             var seconds = watch.Elapsed.TotalSeconds;
             if (r.Shared) text += "\n(Same query as a parallel helper agent: its result is shared, the query ran once.)";
             if (seconds >= 1) text += $"\n(The query took {seconds.ToString("0.0", CultureInfo.InvariantCulture)} s.)";

@@ -317,6 +317,12 @@ namespace PlsqlDevAgent.UI
                     foreach (var p in _pending) _web.CoreWebView2.PostWebMessageAsJson(p);
                     _pending.Clear();
                     Post(TransactionJson(), false);
+                    UpdateContext();
+                    break;
+
+                case "window_exclude":
+                    _session.SetWindowExcluded((string)msg["key"], (bool?)msg["excluded"] ?? false);
+                    UpdateContext();
                     break;
 
                 case "txn_commit":
@@ -351,6 +357,22 @@ namespace PlsqlDevAgent.UI
                         while (lastUser >= 0 && _events.Count > lastUser + 1) _events.RemoveAt(_events.Count - 1);
                     }
                     if (!_session.Retry()) Post(new JObject { ["type"] = "notice", ["text"] = L.T("Nothing to retry.") });
+                    break;
+
+                case "question_reply":
+                    if (_questions.TryRemove((string)msg["id"], out var question))
+                    {
+                        var answer = ((string)msg["answer"] ?? "").Trim();
+                        Record(new JObject { ["type"] = "question_done", ["id"] = (string)msg["id"], ["text"] = answer });
+                        question.TrySetResult(answer);
+                        // the answer may be the choice for objects with local files: show it above the input
+                        Task.Delay(400).ContinueWith(_ => MainThread.Post(UpdateContext), TaskScheduler.Default);
+                    }
+                    break;
+
+                case "change_target_reset":
+                    _session.ResetChangeTarget();
+                    UpdateContext();
                     break;
 
                 case "approval_reply":
@@ -963,10 +985,14 @@ namespace PlsqlDevAgent.UI
                     case "user": case "tool_start": case "tool_end": case "notice": case "error": case "info":
                     case "attachments": case "compacted": case "applied": case "approval": case "approval_done":
                     case "undo_done": case "restore_done": case "tasks": case "subtask_step": case "rewound":
+                    case "question": case "question_done":
                         _events.Add(m.DeepClone());
                         break;
                     case "approval_cancel":
                         _events.Add(new JObject { ["type"] = "approval_done", ["id"] = m["id"], ["ok"] = false, ["text"] = L.T("Cancelled") });
+                        break;
+                    case "question_cancel":
+                        _events.Add(new JObject { ["type"] = "question_done", ["id"] = m["id"], ["cancelled"] = true, ["text"] = "" });
                         break;
                     case "assistant_start":
                         var ev = new JObject { ["type"] = "assistant_full", ["id"] = m["id"], ["text"] = "", ["reasoning"] = "" };
@@ -1041,6 +1067,7 @@ namespace PlsqlDevAgent.UI
             _chatId = NewChatId();
             _chatCreated = DateTime.Now;
             _session.Journal = ChangeJournal.For(_chatId);
+            UpdateContext(); // the choice for objects with local files starts empty again
         }
 
         private void PostChats()
@@ -1065,6 +1092,7 @@ namespace PlsqlDevAgent.UI
             _chatCreated = record.Created;
             _session.Journal = ChangeJournal.For(_chatId);
             Post(new JObject { ["type"] = "replay", ["events"] = record.Events, ["title"] = record.Title }, false);
+            UpdateContext();
         }
 
         // ------------------------------------------------------------------ settings
@@ -1289,8 +1317,35 @@ namespace PlsqlDevAgent.UI
         public void UpdateContext()
         {
             if (!_ready || !Visible) return;
-            Post(new JObject { ["type"] = "context", ["text"] = ContextText() }, false);
+            var target = _session.ChangeTarget;
+            Post(new JObject
+            {
+                ["type"] = "context", ["text"] = ContextText(), ["window"] = WindowJson(),
+                ["target"] = target == null ? null : L.T(target == LocalChanges.Database ? "Database" : target == LocalChanges.Local ? "Local files" : "Both"),
+            }, false);
             Post(GuardJson(), false);
+        }
+
+        /// <summary>The active editor window for the chip above the input (null: none), and whether the user excluded it.</summary>
+        private JObject WindowJson()
+        {
+            try
+            {
+                var c = _ide.GetContext();
+                if (c.WindowKey == null) return null;
+                return new JObject
+                {
+                    ["key"] = c.WindowKey,
+                    ["label"] = c.WindowNameUi,
+                    ["title"] = c.WindowLabelUi,
+                    ["excluded"] = _session.IsWindowExcluded(c),
+                };
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Active window for the chat: " + ex.Message);
+                return null;
+            }
         }
 
         private JObject GuardJson()
@@ -1433,6 +1488,31 @@ namespace PlsqlDevAgent.UI
         {
             public TaskCompletionSource<ApprovalResult> Tcs;
             public ApprovalRequest Request;
+        }
+
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> _questions = new ConcurrentDictionary<string, TaskCompletionSource<string>>();
+
+        public Task<string> AskUser(string callId, string question, string[] options, CancellationToken ct)
+        {
+            var id = "q" + Guid.NewGuid().ToString("N").Substring(0, 10);
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _questions[id] = tcs;
+            var registration = ct.Register(() =>
+            {
+                if (_questions.TryRemove(id, out var q))
+                {
+                    q.TrySetCanceled();
+                    Post(new JObject { ["type"] = "question_cancel", ["id"] = id });
+                }
+            });
+            tcs.Task.ContinueWith(_ => registration.Dispose(), TaskScheduler.Default);
+            Post(new JObject { ["type"] = "question", ["id"] = id, ["callId"] = callId, ["question"] = question, ["options"] = new JArray(options ?? new string[0]) });
+            MainThread.Post(() =>
+            {
+                if (!Visible) ShowNear();
+                else if (!ContainsFocus) FlashWindow(Handle, true);
+            });
+            return tcs.Task;
         }
 
         private sealed class Win32Owner : IWin32Window

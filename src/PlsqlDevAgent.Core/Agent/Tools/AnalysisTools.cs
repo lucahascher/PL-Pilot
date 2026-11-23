@@ -169,7 +169,7 @@ namespace PlsqlDevAgent.Agent.Tools
             if (direction == "uses") text = Uses(ctx, obj);
             else if (!string.IsNullOrWhiteSpace(Str(args, "column"))) text = ColumnUsages(ctx, obj, Ident(Str(args, "column").Trim()));
             else text = UsedBy(ctx, obj, Math.Max(1, Math.Min(Int(args, "max_depth", 3), 10)));
-            return Task.FromResult(Db.Truncate(text, ctx.Config.MaxToolOutputChars));
+            return Task.FromResult(Db.Truncate(text, ctx.Config.ToolOutputLimit));
         }
 
         private const string NotCovered =
@@ -552,7 +552,7 @@ namespace PlsqlDevAgent.Agent.Tools
             if (frames.Count > 25) sb.Append($"... {frames.Count - 25} more frames not shown.\n");
             sb.Append("The line numbers belong to the version that was compiled when the error happened: if a unit was " +
                       "compiled after that (see 'last compiled'), the lines can be off – list_backups may have the older version.");
-            return Task.FromResult(Db.Truncate(sb.ToString(), ctx.Config.MaxToolOutputChars));
+            return Task.FromResult(Db.Truncate(sb.ToString(), ctx.Config.ToolOutputLimit));
         }
 
         private static readonly string[] Preference = { "PACKAGE BODY", "TYPE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "TYPE" };

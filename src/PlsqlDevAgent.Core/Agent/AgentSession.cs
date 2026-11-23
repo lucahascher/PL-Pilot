@@ -25,6 +25,8 @@ namespace PlsqlDevAgent.Agent
         void ToolStart(string callId, string toolName, string summary, string argumentsJson);
         void ToolEnd(string callId, bool ok, string result, JObject meta);
         Task<ApprovalResult> RequestApproval(string callId, ApprovalRequest request, CancellationToken ct);
+        /// <summary>Shows a question with answer buttons (and a text field) and returns the user's answer.</summary>
+        Task<string> AskUser(string callId, string question, string[] options, CancellationToken ct);
         void Attachments(JArray items);
         void ContextUsage(int tokens, int window, bool estimated);
         void Compacted(string summary, int tokensBefore, int tokensAfter);
@@ -72,6 +74,8 @@ namespace PlsqlDevAgent.Agent
             // tool calls get their own copy with the call id (ExecuteToolAsync); these are the defaults outside a call
             _ctx = new ToolContext { Ide = ide, Config = config, RequestApproval = r => ApproveAsync(r, null), Guard = CurrentGuard, Mcp = Mcp };
             _ctx.SetTasks = SetTasks;
+            _ctx.WindowExcluded = IsWindowExcluded;
+            _ctx.ChangeTarget = new ToolContext.ChangeTargetHolder();
             _ctx.RunSubtask = task => RunSubtaskAsync(task, null, _ctx.Cancellation);
             _ctx.RecordChange = change =>
             {
@@ -116,6 +120,40 @@ namespace PlsqlDevAgent.Agent
         }
 
         public JArray CurrentTasks => (JArray)_tasks.DeepClone();
+
+        /// <summary>
+        /// Editor windows the user crossed out above the input (by <see cref="IdeContext.WindowKey"/>): not part of the
+        /// requests, the editor tools refuse them. Kept for the whole PL/SQL Developer session, also in new chats.
+        /// </summary>
+        private readonly HashSet<string> _excludedWindows = new HashSet<string>();
+
+        /// <summary>Where changes of objects with local source files go in this chat ("database", "local", "both"), or null (not asked yet).</summary>
+        public string ChangeTarget => _ctx.ChangeTarget.Value;
+
+        /// <summary>The user wants to be asked again (clicked the choice above the input).</summary>
+        public void ResetChangeTarget()
+        {
+            _ctx.ChangeTarget.Value = null;
+            Log.Info("Choice for objects with local files reset: the user is asked again");
+        }
+
+        public bool IsWindowExcluded(IdeContext c)
+        {
+            var key = c?.WindowKey;
+            if (key == null) return false;
+            lock (_excludedWindows) return _excludedWindows.Contains(key);
+        }
+
+        public void SetWindowExcluded(string key, bool excluded)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            lock (_excludedWindows)
+            {
+                if (excluded) _excludedWindows.Add(key);
+                else _excludedWindows.Remove(key);
+            }
+            Log.Info($"Active window {(excluded ? "excluded from" : "included in")} the chat: {key}");
+        }
 
         private void SetTasks(JArray tasks)
         {
@@ -218,6 +256,7 @@ namespace PlsqlDevAgent.Agent
             _systemPrompt = null;
             _ctx.ResetSchemaCache();
             _tasks = new JArray();
+            _ctx.ChangeTarget.Value = null; // asked again in the next chat
             _ui.Tasks(new JArray());
             _ui.ContextUsage(0, Config.ContextWindowTokens, true);
             _checkpoint = null;
@@ -427,12 +466,14 @@ namespace PlsqlDevAgent.Agent
             _ctx.PlanMode = planMode; // read-only tools that could change data (measure_sql with DML) check it
             var notes = new List<string>();
             while (_notes.TryDequeue(out var n)) notes.Add(n);
+            if (LocalChanges.Describe(_ctx.ChangeTarget.Value) is string target)
+                notes.Add($"Changes of objects that also have local source files go to: {target} (the user's choice in this chat).");
             string contextBlock;
             try
             {
                 var ideCtx = _ide.GetContext();
                 _userSchema = ideCtx.Connected ? _ctx.CurrentSchema : null;
-                contextBlock = SystemPrompt.ContextBlock(ideCtx, _userSchema, guard, notes, planMode);
+                contextBlock = SystemPrompt.ContextBlock(ideCtx, _userSchema, guard, notes, planMode, IsWindowExcluded(ideCtx));
             }
             catch (Exception ex)
             {
@@ -446,7 +487,7 @@ namespace PlsqlDevAgent.Agent
             _history.Add(userMessage);
             if (_checkpoint != null) _checkpointMessages[_checkpoint] = (string)userMessage["content"];
 
-            int continues = 0, stepsInRound = 0;
+            int continues = 0, stepsInRound = 0, lookupTurns = 0, focusNudges = 0;
             bool progressSinceNudge = true;
             for (int step = 0; ; step++, stepsInRound++)
             {
@@ -566,8 +607,32 @@ namespace PlsqlDevAgent.Agent
                         _history.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = batch[k].Id, ["content"] = results[k] });
                     i += batch.Count;
                 }
+
+                // a model that only looks things up turn after turn (search, think, search again) is reminded to focus on
+                // the result; the note goes into the newest tool result, so the conversation structure and the prompt
+                // cache stay as they are
+                bool progress = calls.Any(c => c.Name == "update_tasks" || tools.FirstOrDefault(t => t.Name == c.Name)?.Mutating == true);
+                lookupTurns = progress ? 0 : lookupTurns + 1;
+                if (lookupTurns >= FocusNudgeAfterTurns && focusNudges < MaxFocusNudges && _history.Last is JObject lastTool && (string)lastTool["role"] == "tool")
+                {
+                    lastTool["content"] = (string)lastTool["content"] + "\n\n" + FocusNote(lookupTurns, planMode);
+                    Log.Info($"Focus note after {lookupTurns} lookup turns in a row");
+                    _ui.Notice(L.T("The agent has looked things up {0} times in a row without a result: reminded it to focus on the task.", lookupTurns));
+                    lookupTurns = 0;
+                    focusNudges++;
+                }
             }
         }
+
+        /// <summary>Model turns in a row with only lookups (no change, no task progress) before the focus note.</summary>
+        public const int FocusNudgeAfterTurns = 10;
+        private const int MaxFocusNudges = 2;
+
+        internal static string FocusNote(int turns, bool planMode) =>
+            $"[Note from PL/Pilot: {turns} investigation steps in a row without a change or a result. Stop and check: what exactly " +
+            $"is still missing to {(planMode ? "present the plan" : "complete the task")}? If you know enough, act now" +
+            (planMode ? " and present the plan." : " (make the change, compile, or answer).") +
+            " Otherwise get only that missing piece – all of it in one step – and do not read anything you already have.]";
 
         private List<AgentTool> AvailableTools(GuardState guard, bool planMode) => AllTools()
             .Where(t => !((guard.ReadOnly || planMode) && t.Mutating))
@@ -584,7 +649,7 @@ namespace PlsqlDevAgent.Agent
         private async Task<string> RunSubtaskAsync(string task, string parentCallId, CancellationToken ct)
         {
             var tools = AllTools()
-                .Where(t => !t.Mutating && t.Name != "run_subtask" && t.Name != "update_tasks")
+                .Where(t => !t.Mutating && t.Name != "run_subtask" && t.Name != "update_tasks" && t.Name != AskUserTool.ToolName)
                 .Where(t => !t.NeedsWorkspace || Config.HasWorkspace)
                 .ToList();
             var schemas = new JArray(tools.Select(t => t.ToOpenAiTool()));
@@ -595,7 +660,7 @@ namespace PlsqlDevAgent.Agent
             try
             {
                 var c = _ide.GetContext();
-                context = SystemPrompt.ContextBlock(c, c.Connected ? _ctx.CurrentSchema : null, null, null);
+                context = SystemPrompt.ContextBlock(c, c.Connected ? _ctx.CurrentSchema : null, null, null, windowExcluded: IsWindowExcluded(c));
             }
             catch { }
             var messages = new JArray
@@ -605,10 +670,12 @@ namespace PlsqlDevAgent.Agent
             };
             // optionally a smaller / faster model for the research
             var cfg = Config;
-            if (!string.IsNullOrWhiteSpace(Config.SubtaskModel))
+            bool ownModel = !string.IsNullOrWhiteSpace(Config.SubtaskModel);
+            if (ownModel)
             {
                 cfg = Config.Clone();
                 cfg.Model = Config.SubtaskModel.Trim();
+                subCtx.DossierCharsOverride = Config.ToolOutputLimit;
             }
             Log.Info($"Sub-task started ({cfg.Model}): " + (task.Length > 200 ? task.Substring(0, 200) : task));
             var watch = System.Diagnostics.Stopwatch.StartNew();
@@ -649,7 +716,9 @@ namespace PlsqlDevAgent.Agent
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex) { result = "Error: " + ex.GetBaseException().Message; }
-                    messages.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = call.Id, ["content"] = Db.Truncate(result ?? "", Config.MaxToolOutputChars) });
+                    // a helper model of its own may have a smaller context window than the main model: no large dossiers
+                    int limit = tool == null ? Config.ToolOutputLimit : ownModel ? Math.Min(tool.OutputLimit(Config), Config.ToolOutputLimit) : tool.OutputLimit(Config);
+                    messages.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = call.Id, ["content"] = Db.Truncate(result ?? "", limit) });
                 }
             }
 
@@ -709,6 +778,7 @@ namespace PlsqlDevAgent.Agent
             callCtx.RequestApproval = r => ApproveAsync(r, call.Id);
             callCtx.RunSubtask = task => RunSubtaskAsync(task, call.Id, callCtx.Cancellation);
             callCtx.Progress = text => _ui.SubtaskStep(call.Id, text);
+            callCtx.AskUser = (question, options) => _ui.AskUser(call.Id, question, options, callCtx.Cancellation);
             if (!_ide.UsesOwnSession) callCtx.ResetSchemaCache(); // the user's windows share the session and may have switched the schema
             try
             {
@@ -731,7 +801,7 @@ namespace PlsqlDevAgent.Agent
                 result = "Error: " + ex.GetBaseException().Message;
             }
 
-            result = Db.Truncate(result ?? "", Config.MaxToolOutputChars);
+            result = Db.Truncate(result ?? "", tool.OutputLimit(Config));
             _ui.ToolEnd(call.Id, ok, result, callCtx.UiMeta);
             return result;
         }
@@ -900,10 +970,11 @@ namespace PlsqlDevAgent.Agent
         private JArray BuildMessages()
         {
             long total = _history.Sum(m => ((string)m["content"] ?? "").Length + (m["tool_calls"]?.ToString().Length ?? 0));
-            if (total > Config.ContextBudgetChars)
+            long budget = Config.ContextBudgetLimit;
+            if (total > budget)
             {
                 int protectedTail = 8;
-                long target = (long)Config.ContextBudgetChars * ShortenToPercent / 100;
+                long target = budget * ShortenToPercent / 100;
                 for (int i = 0; i < _history.Count - protectedTail && total > target; i++)
                 {
                     var m = (JObject)_history[i];

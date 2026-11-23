@@ -22,6 +22,9 @@ namespace PlsqlDevAgent.Agent.Tools
         /// <summary>One line shown in the chat for this call.</summary>
         public virtual string Summarize(JObject args) => "";
 
+        /// <summary>Most characters of this tool's result in the conversation (longer results are cut).</summary>
+        public virtual int OutputLimit(AgentConfig cfg) => cfg.ToolOutputLimit;
+
         public abstract Task<string> ExecuteAsync(JObject args, ToolContext ctx);
 
         public JObject ToOpenAiTool() => new JObject
@@ -269,6 +272,37 @@ namespace PlsqlDevAgent.Agent.Tools
         public bool IsHelper;
 
         /// <summary>
+        /// Where the user wants changes of objects that also have local source files: "database", "local", "both" or null
+        /// (not asked yet in this chat). Shared by the copies of the context.
+        /// </summary>
+        public sealed class ChangeTargetHolder { public volatile string Value; }
+        public ChangeTargetHolder ChangeTarget;
+
+        /// <summary>Asks the user a question with answer buttons (ask_user); null where nobody can answer (helper agents).</summary>
+        public Func<string, string[], Task<string>> AskUser;
+
+        /// <summary>The user excluded this window from the chat (crossed out above the input); null: nothing is excluded.</summary>
+        public Func<IdeContext, bool> WindowExcluded;
+
+        /// <summary>
+        /// Why the active editor window must not be read or changed now (the user excluded it from the chat), or null.
+        /// Checked by the tools that read or change the active window.
+        /// </summary>
+        public string ExcludedWindowMessage(IdeContext c)
+        {
+            if (WindowExcluded == null || c == null || !WindowExcluded(c)) return null;
+            return $"Not done: the user has excluded the active window ({c.WindowLabel}) from the chat, so it is not part of this " +
+                   "request – do not read or change it. Work with the objects of the request instead (get_object_source, explore_objects). " +
+                   "If you really need this window, ask the user to include it again (click its name above the chat input).";
+        }
+
+        /// <summary>Most characters of an object dossier in this context (null: <see cref="AgentConfig.ExploreOutputLimit"/>).</summary>
+        public int? DossierCharsOverride;
+
+        /// <summary>Most characters of an object dossier (explore_objects, @mentions).</summary>
+        public int DossierLimit => DossierCharsOverride ?? Config.ExploreOutputLimit;
+
+        /// <summary>
         /// A copy for one tool call with its own <see cref="UiMeta"/> (tool calls may run in parallel, e.g. helper
         /// agents); the schema cache is shared.
         /// </summary>
@@ -293,6 +327,7 @@ namespace PlsqlDevAgent.Agent.Tools
             copy.RecordChange = null;
             copy.SetTasks = null;
             copy.RunSubtask = null;
+            copy.AskUser = null;
             copy.IsHelper = true;
             return copy;
         }
@@ -343,6 +378,7 @@ namespace PlsqlDevAgent.Agent.Tools
             // planning
             new UpdateTasksTool(),
             new RunSubtaskTool(),
+            new AskUserTool(),
             // IDE
             new GetIdeContextTool(),
             new GetEditorTextTool(),
@@ -354,6 +390,7 @@ namespace PlsqlDevAgent.Agent.Tools
             // Database (read)
             new RunQueryTool(),
             new ListObjectsTool(),
+            new ExploreObjectsTool(),
             new DescribeObjectTool(),
             new GetObjectSourceTool(),
             new SearchSourceTool(),
@@ -372,6 +409,7 @@ namespace PlsqlDevAgent.Agent.Tools
             new RestoreBackupTool(),
             // Files
             new ListFilesTool(),
+            new FindObjectFilesTool(),
             new ReadFileTool(),
             new SearchFilesTool(),
             new WriteFileTool(),

@@ -190,7 +190,7 @@ namespace PlsqlDevAgent.Harness
                 if (_prompt.StartsWith("Please improve"))
                 {
                     if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SpeedChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); await McpChecks(); await McpTeamChecks(); await SourceReadChecks(); }
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SpeedChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); await McpChecks(); await McpTeamChecks(); await SourceReadChecks(); await ExploreChecks(); await WindowAndProgressChecks(); await LocalFilesChecks(); await FocusChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -450,6 +450,275 @@ namespace PlsqlDevAgent.Harness
             await SendAndWait("TOOL: run_query {\"sql\":\"select count(*) from emp\"}");
             Check("other queries get no note", !LastToolResult().Contains("do not read PL/SQL source"));
             _chat.ApplyConfigForTest(c => c.SystemPromptOverride = "");
+        }
+
+        /// <summary>
+        /// Object dossiers: size limits that follow the context window, explore_objects with its own output limit and a cut
+        /// note, @mentions attaching one dossier.
+        /// </summary>
+        private async Task ExploreChecks()
+        {
+            var small = new AgentConfig { ContextWindowTokens = 131072 };
+            var large = new AgentConfig { ContextWindowTokens = 1048576 };
+            var unscaled = new AgentConfig { ContextWindowTokens = 1048576, ScaleWithContextWindow = false };
+            Check($"limits for a 128k window stay as before ({small.ToolOutputLimit} / {small.ContextBudgetLimit}, dossier {small.ExploreOutputLimit})",
+                small.ToolOutputLimit == 40000 && small.ContextBudgetLimit == 300000 && small.ExploreOutputLimit > 60000 && small.ExploreOutputLimit < 80000);
+            Check($"a 1M window raises them ({large.ToolOutputLimit} / {large.ContextBudgetLimit}, dossier {large.ExploreOutputLimit})",
+                large.ToolOutputLimit > 140000 && large.ContextBudgetLimit > 1800000 && large.ExploreOutputLimit == 400000);
+            Check("without scaling the configured values apply",
+                unscaled.ToolOutputLimit == 40000 && unscaled.ContextBudgetLimit == 300000 && unscaled.ExploreOutputLimit == 40000);
+
+            await NewChat();
+            var editorBefore = Editor.Text;
+            try
+            {
+                await SendAndWait("TOOL: explore_objects {\"names\":[\"EMP_API\",\"emp\",\"NO_SUCH_THING\"]}");
+                var d = LastToolResult();
+                Check("explore_objects: one dossier with the package source and status, the table's columns and size, the unknown name noted",
+                    d.StartsWith("# Dossier: PACKAGE SCOTT.EMP_API, TABLE SCOTT.EMP") && d.Contains("## PACKAGE SCOTT.EMP_API") && d.Contains("procedure list_emps") &&
+                    d.Contains("PACKAGE BODY VALID") && d.Contains("## TABLE SCOTT.EMP") && d.Contains("EMPNO") && d.Contains("~14 rows") &&
+                    d.Contains("NO_SUCH_THING: no such object"));
+                Check("explore_objects is offered to the model and named in the tool rules",
+                    MockLlmServer.LastRequestToolsJson.Contains("\"explore_objects\"") && MockLlmServer.LastSystemPrompt.Contains("your first database call is explore_objects"));
+
+                // own output limit: longer than MaxToolOutputChars without being cut
+                Editor.Text = SampleCode.Replace("end emp_api;\r\n", "") +
+                              string.Concat(Enumerable.Range(1, 40).Select(i => $"  -- comment line {i} of the long package body\r\n")) +
+                              "  procedure close_quarter is\r\n  begin\r\n    null;\r\n  end close_quarter;\r\nend emp_api;\r\n";
+                _chat.ApplyConfigForTest(c => { c.MaxToolOutputChars = 2000; c.ScaleWithContextWindow = false; c.ExploreMaxChars = 30000; });
+                await SendAndWait("TOOL: explore_objects {\"names\":\"EMP_API\"}");
+                d = LastToolResult();
+                Check($"the dossier has its own output limit ({d.Length} chars, tool output limit 2,000) and is not cut",
+                    d.Length > 2000 && !d.Contains("[truncated") && d.Contains("procedure close_quarter"));
+
+                // too small for the source: cut at a line with a note where to continue
+                _chat.ApplyConfigForTest(c => c.ExploreMaxChars = 4000);
+                await SendAndWait("TOOL: explore_objects {\"names\":[\"EMP_API\"]}");
+                d = LastToolResult();
+                Check($"a dossier over its limit ({d.Length} chars of 4,000) cuts the source and lists what is not shown",
+                    d.Length <= 4100 && d.Contains("too long for one answer") && d.Contains("close_quarter (line"));
+            }
+            finally
+            {
+                _chat.ApplyConfigForTest(c => { c.MaxToolOutputChars = new AgentConfig().MaxToolOutputChars; c.ScaleWithContextWindow = true; c.ExploreMaxChars = 0; });
+                Editor.Text = editorBefore;
+            }
+
+            await NewChat();
+            await SendAndWait("@EMP_API @EMP what do they do?");
+            var user = MockLlmServer.LastUserContent;
+            Check("@mentions of database objects attach one object dossier",
+                user.Contains("kind=\"object dossier\"") && user.Contains("# Dossier: PACKAGE SCOTT.EMP_API, TABLE SCOTT.EMP"));
+            var chips = await Js("Array.from(document.querySelectorAll('.chip')).map(c => c.innerText).join(' | ')");
+            Check($"one chip per mentioned object ({chips.Replace("\n", " ")})", chips.Contains("SCOTT.EMP_API") && chips.Contains("SCOTT.EMP") && chips.Contains("dossier"));
+
+            // settings: the limits in effect follow the context window as it is typed
+            Plugin.Instance.OnMenuClick(Bootstrap.MiSettings);
+            await Task.Delay(800);
+            var before = await Js("document.getElementById('limitsInfo').innerText");
+            await Js("const w = document.getElementById('ContextWindowTokens'); w.value = 1048576; w.dispatchEvent(new Event('input'))");
+            var after = await Js("document.getElementById('limitsInfo').innerText");
+            await Js("closeSettings()"); // not saved
+            Check($"settings show the limits in effect ({before} → {after})",
+                before.StartsWith("In effect: tool results 40,000") && after.Contains("tool results 146,800") && after.Contains("object dossier 400,000"));
+        }
+
+        /// <summary>
+        /// The active window chip (exclude the open window from the chat) and the live status of a running request
+        /// (activity with its time, step, total time; tool durations; summary at the end).
+        /// </summary>
+        private async Task WindowAndProgressChecks()
+        {
+            await NewChat();
+            var chip = await Js("document.getElementById('winRow').className + ' | ' + document.getElementById('winChip').innerText");
+            Check($"the active window is shown above the input ({chip})", chip.StartsWith("winrow show") && chip.Contains("EMP_API"));
+            await SendAndWait("TOOL: get_editor_text {}");
+            Check("an included window is described as possibly unrelated, and the agent can read it",
+                MockLlmServer.LastUserContent.Contains("Active window (open in the IDE, may be unrelated to the request)") && LastToolResult().Contains("EMP_API"));
+            Check("the tool rules say the open window may have nothing to do with the request",
+                MockLlmServer.LastSystemPrompt.Contains("it may have nothing to do with the request") && !MockLlmServer.LastSystemPrompt.Contains("Read the active editor (get_editor_text)"));
+
+            await Js("document.getElementById('winChip').click()");
+            await Task.Delay(600);
+            var crossed = await Js("document.getElementById('winChip').className");
+            await SendAndWait("TOOL: get_editor_text {}\nTOOL: edit_editor {\"old_string\":\"emp_api\",\"new_string\":\"x\"}");
+            var user = MockLlmServer.LastUserContent;
+            var messages = Newtonsoft.Json.Linq.JArray.Parse(MockLlmServer.LastMessagesJson);
+            var toolResults = messages.Where(m => (string)m["role"] == "tool").Select(m => (string)m["content"]).ToList();
+            Check($"a crossed-out window ({crossed}) is excluded: not described to the model, the editor tools refuse it",
+                crossed.Contains("excluded") && user.Contains("Active window: excluded by the user") && !user.Contains("EMP_API") &&
+                toolResults.Count >= 2 && toolResults.Skip(toolResults.Count - 2).All(r => r.StartsWith("Not done: the user has excluded the active window")) &&
+                Editor.Text.Contains("emp_api"));
+            await NewChat();
+            Check("the exclusion stays in a new chat", (await Js("document.getElementById('winChip').className")).Contains("excluded"));
+            await Js("document.getElementById('winChip').click()");
+            await Task.Delay(600);
+            await SendAndWait("TOOL: get_editor_text {}");
+            Check("clicked again, the window is included again", LastToolResult().Contains("EMP_API") && !(await Js("document.getElementById('winChip').className")).Contains("excluded"));
+
+            // live status while a tool runs (the simulated slow query takes 1.3 s), durations and summary afterwards
+            await NewChat();
+            await Submit("TOOL: run_query {\"sql\":\"select * from pda_slow\"}");
+            string status = "";
+            for (int i = 0; i < 40 && !status.Contains("run_query"); i++)
+            {
+                await Task.Delay(100);
+                status = await Js("document.getElementById('hint').innerText");
+            }
+            Check($"while it works the status line shows the activity, its time, the step and the total time ({status.Replace("\n", " ")})",
+                status.Contains("run_query") && status.Contains("step 1") && status.Contains(" s") && status.Contains("Esc to stop"));
+            await WaitIdle();
+            await Task.Delay(800);
+            var dur = await Js("Array.from(document.querySelectorAll('.tool .tdur')).map(x => x.innerText).join(',')");
+            var sum = await Js("Array.from(document.querySelectorAll('.runsum')).map(x => x.innerText).join(' | ')");
+            Check($"afterwards the tool line shows its duration ({dur}) and the response a summary ({sum})",
+                System.Text.RegularExpressions.Regex.IsMatch(dur, @"^\d+\.\d s") && sum.Contains("Worked") && sum.Contains("2 model turns") && sum.Contains("1 tool call") &&
+                (await Js("document.getElementById('hint').innerText")).Length == 0);
+            Check("the tool rules ask for one sentence before tool calls", MockLlmServer.LastSystemPrompt.Contains("Before each group of tool calls write one short sentence"));
+
+            // pictures for a visual check: a thinking model (events fed to the page) with the window crossed out
+            await NewChat();
+            await Js("document.getElementById('winChip').click()");
+            await Task.Delay(400);
+            await Js("onHost({ type: 'user', text: 'Why is PDA_LLM_PKG.avg_amount failing?', mode: 'agent' }); onHost({ type: 'busy', value: true });" +
+                     "onHost({ type: 'assistant_start', id: 'vis1' }); onHost({ type: 'reasoning', id: 'vis1', text: 'The user asks about avg_amount.\\nI should read the package body and check how l_cnt is computed when no rows match' });");
+            await Task.Delay(2300);
+            await _chat.CapturePageAsync(Path.Combine(_autoTestDir, "status-thinking.png"));
+            await Js("onHost({ type: 'assistant_end', id: 'vis1' }); onHost({ type: 'tool_start', callId: 'vis2', name: 'explore_objects', summary: 'PDA_LLM_PKG, PDA_LLM_ORDER', args: '{}' });");
+            await Task.Delay(1200);
+            await _chat.CapturePageAsync(Path.Combine(_autoTestDir, "status-tool.png"));
+            await Js("onHost({ type: 'tool_end', callId: 'vis2', ok: true, result: '# Dossier' }); onHost({ type: 'busy', value: false });");
+            await Task.Delay(400);
+            await _chat.CapturePageAsync(Path.Combine(_autoTestDir, "status-done.png"));
+            await Js("document.getElementById('winChip').click()");
+            await Task.Delay(400);
+        }
+
+        /// <summary>
+        /// Local source files: the index of the project folder (sub folders per schema, schema from the statement or the
+        /// folder), find_object_files with the comparison to the database, local files in dossiers, and ask_user.
+        /// </summary>
+        private async Task LocalFilesChecks()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "plsqldevagent-harness-data", "project");
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            void Put(string rel, string text)
+            {
+                var p = Path.Combine(dir, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(p));
+                File.WriteAllText(p, text);
+            }
+            Editor.Text = SampleCode;
+            Put(@"SCOTT\packages\emp_api.pks", "create or replace package emp_api is\r\n  procedure list_emps(p_deptno in number);\r\nend emp_api;\r\n/\r\n");
+            Put(@"SCOTT\packages\emp_api.pkb", "-- body of EMP_API\r\n" + SampleCode.TrimEnd() + "\r\n/\r\nshow errors\r\n");
+            Put(@"HR\procedures\raise_sal.prc", "CREATE OR REPLACE PROCEDURE raise_sal IS\r\nBEGIN\r\n  NULL;\r\nEND;\r\n/\r\n");
+            Put(@"misc\other_schema.sql", "create or replace package hr.emp_api is\r\nend;\r\n/\r\ncreate table scott.audit_log (id number);\r\n");
+            try
+            {
+                _chat.ApplyConfigForTest(c => c.WorkspaceDir = dir);
+                await NewChat();
+                await SendAndWait("TOOL: find_object_files {\"names\":[\"EMP_API\"]}");
+                var r = LastToolResult();
+                Check($"find_object_files: specification and body file of the package, compared with the database, not the other schema's copy ({r.Replace("\n", " | ")})",
+                    r.Contains("SCOTT/packages/emp_api.pks lines 1-3 (PACKAGE): differs from the database") &&
+                    r.Contains("SCOTT/packages/emp_api.pkb lines 2-") && r.Contains("(PACKAGE BODY): identical to the database") && !r.Contains("other_schema"));
+                await SendAndWait("TOOL: find_object_files {}");
+                r = LastToolResult();
+                Check("overview: all sub folders are indexed", r.Contains("5 database objects in 4 source files") && r.Contains("HR/: 1 objects") && r.Contains("SCOTT/: 2 objects"));
+                await SendAndWait("TOOL: find_object_files {\"name_like\":\"RAISE%\"}");
+                Check("the schema of a unit without one in its statement comes from its folder", LastToolResult().Contains("PROCEDURE HR.RAISE_SAL: HR/procedures/raise_sal.prc lines 1-4"));
+                await SendAndWait("TOOL: explore_objects {\"names\":[\"EMP_API\"]}");
+                Check("the dossier lists the local files of the object", LastToolResult().Contains("Local files (project folder):") && LastToolResult().Contains("emp_api.pkb"));
+                Check("the system prompt explains the project folder with its sub folders and that the plug-in asks",
+                    MockLlmServer.LastSystemPrompt.Contains("# Project folder (local source files)") && MockLlmServer.LastSystemPrompt.Contains("the plug-in asks the user"));
+
+                // changing an object that has local files: the plug-in asks once per chat; "local files" refuses the database
+                // change and names the files, the choice is shown above the input and can be reset there
+                await Js(AutoApproveJs);
+                await Submit("TOOL: compile_plsql {\"source\":\"create or replace package body emp_api is\\nend emp_api;\"}");
+                string ask = "";
+                for (int i = 0; i < 50 && ask.Length == 0; i++)
+                {
+                    await Task.Delay(100);
+                    ask = await Js("(document.querySelector('.approval.question:not(.done)') || {}).innerText || ''");
+                }
+                await Task.Delay(800);
+                await Js("Array.from(document.querySelectorAll('.approval.question:not(.done) button')).find(b => b.innerText === 'Local files').click()");
+                await WaitIdle();
+                await Task.Delay(700);
+                var refused = LastToolResult();
+                var chipText = await Js("document.getElementById('targetChip').className + ' | ' + document.getElementById('targetChip').innerText");
+                Check($"compile_plsql of an object with local files asks first ({ask.Replace("\n", " ")}); 'Local files' refuses it and lists the files ({chipText})",
+                    ask.Contains("EMP_API also exists in local files") && ask.Contains("emp_api.pkb") &&
+                    refused.StartsWith("Not done: the user wants changes") && refused.Contains("SCOTT/packages/emp_api.pkb lines 2-9 (PACKAGE BODY)") &&
+                    !refused.Contains("emp_api.pks") && !chipText.Contains("hidden") && chipText.Contains("Changes: Local files"));
+                await SendAndWait("TOOL: edit_editor {\"old_string\":\"list_emps\",\"new_string\":\"list_all_emps\",\"replace_all\":true}");
+                Check("the choice holds in the chat: editing the database object's window is refused without asking again",
+                    LastToolResult().StartsWith("Not done: the user wants changes") && Editor.Text.Contains("list_emps") &&
+                    (await Js("document.querySelectorAll('.approval.question:not(.done)').length")) == "0");
+                Check("the choice is noted for the model", MockLlmServer.LastUserContent.Contains("go to: the local files only"));
+                await Js("document.getElementById('targetChip').click()");
+                await Task.Delay(600);
+                await Submit("TOOL: edit_file {\"path\":\"SCOTT/packages/emp_api.pks\",\"old_string\":\"list_emps\",\"new_string\":\"list_emps2\"}");
+                ask = "";
+                for (int i = 0; i < 50 && ask.Length == 0; i++)
+                {
+                    await Task.Delay(100);
+                    ask = await Js("(document.querySelector('.approval.question:not(.done)') || {}).innerText || ''");
+                }
+                await Task.Delay(800);
+                await Js("Array.from(document.querySelectorAll('.approval.question:not(.done) button')).find(b => b.innerText === 'Both').click()");
+                await WaitIdle();
+                await Task.Delay(500);
+                Check($"after a reset the next change asks again, also when the agent edits a local file first ({ask.Replace("\n", " ")})",
+                    ask.Contains("also exists in local files") && LastToolResult().StartsWith("Updated SCOTT\\packages\\emp_api.pks") &&
+                    File.ReadAllText(Path.Combine(dir, @"SCOTT\packages\emp_api.pks")).Contains("list_emps2"));
+                await Js("clearInterval(window.__autoApprove)");
+                await NewChat();
+                Check("a new chat starts without a choice", (await Js("document.getElementById('targetChip').className")).Contains("hidden"));
+
+                // ask_user: a card with the options; the click goes back to the running request as the tool result
+                await Submit("TOOL: ask_user {\"question\":\"Where should the change go?\",\"options\":[\"Database\",\"Local files\",\"Both\"]}");
+                string card = "";
+                for (int i = 0; i < 50 && card.Length == 0; i++)
+                {
+                    await Task.Delay(100);
+                    card = await Js("(document.querySelector('.approval.question:not(.done)') || {}).innerText || ''");
+                }
+                await Task.Delay(800); // armed after 0.7 s
+                var status = await Js("document.getElementById('hint').innerText");
+                await Js("Array.from(document.querySelectorAll('.approval.question:not(.done) button')).find(b => b.innerText === 'Local files').click()");
+                await WaitIdle();
+                await Task.Delay(500);
+                Check($"ask_user shows the question with its options ({card.Replace("\n", " ")}), waits ({status.Replace("\n", " ")}) and returns the click",
+                    card.Contains("Where should the change go?") && card.Contains("Both") && status.Contains("Waiting for your answer") &&
+                    LastToolResult() == "The user chose: Local files" &&
+                    (await Js("document.querySelector('.approval.question.done .verdict').innerText")).Contains("Answer: Local files"));
+            }
+            finally
+            {
+                _chat.ApplyConfigForTest(c => c.WorkspaceDir = "");
+                try { Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        /// <summary>Working method: the prompt sections, and the focus note after many lookups in a row without progress.</summary>
+        private async Task FocusChecks()
+        {
+            await NewChat();
+            int lookups = AgentSession.FocusNudgeAfterTurns + 1;
+            await SendAndWait(string.Join("\n", Enumerable.Repeat("TOOL: get_ide_context {}", lookups)));
+            var messages = Newtonsoft.Json.Linq.JArray.Parse(MockLlmServer.LastMessagesJson);
+            var tools = messages.Where(m => (string)m["role"] == "tool").Select(m => (string)m["content"]).ToList();
+            int noted = tools.FindIndex(c => c.Contains("investigation steps in a row"));
+            var notice = await Js("Array.from(document.querySelectorAll('.notice')).map(n => n.innerText).join(' | ')");
+            Check($"after {AgentSession.FocusNudgeAfterTurns} lookup turns in a row the newest tool result carries a focus note (at result {noted + 1} of {tools.Count}), shown as a notice",
+                noted == AgentSession.FocusNudgeAfterTurns - 1 && tools.Count(c => c.Contains("investigation steps in a row")) == 1 &&
+                tools[noted].Contains("If you know enough, act now") && notice.Contains("reminded it to focus on the task"));
+            Check("the system prompt has the working method and the strategy for large databases",
+                MockLlmServer.LastSystemPrompt.Contains("# Working method: goal first, few large steps") &&
+                MockLlmServer.LastSystemPrompt.Contains("# Large databases (many schemas, thousands of objects)") &&
+                MockLlmServer.LastSystemPrompt.Contains("Locate before you read"));
         }
 
         /// <summary>Team configuration (mcp.json), prompts as slash commands, resources as @server:… mentions.</summary>
@@ -786,7 +1055,7 @@ namespace PlsqlDevAgent.Harness
             await SendAndWait("Answer briefly: hello");
             var sys = MockLlmServer.LastSystemPrompt;
             Check("model receives custom prompt + company rules + tool rules",
-                sys.StartsWith("You are TESTBOT") && sys.Contains("RULE-XYZ") && sys.Contains("# Longer tasks"));
+                sys.StartsWith("You are TESTBOT") && sys.Contains("RULE-XYZ") && sys.Contains("# Working method: goal first, few large steps"));
 
             // reset to default
             await Js("document.getElementById('btnSettings').click()");
@@ -1266,7 +1535,7 @@ namespace PlsqlDevAgent.Harness
                 //    conversation (what the server's prompt cache can reuse) stays unchanged for several steps
                 Editor.Text = SampleCode + string.Concat(Enumerable.Range(1, 40).Select(i => $"-- comment line {i} that makes the editor text longer\r\n"));
                 // (the budget must be large against the last 8 messages, which are never shortened: 300,000 by default)
-                _chat.ApplyConfigForTest(c => c.ContextBudgetChars = 30000);
+                _chat.ApplyConfigForTest(c => { c.ContextBudgetChars = 30000; c.ScaleWithContextWindow = false; });
                 int start;
                 lock (MockLlmServer.MainRequests) start = MockLlmServer.MainRequests.Count;
                 await SendAndWait(string.Join("\n", Enumerable.Repeat("TOOL: get_editor_text {}", 20)));
@@ -1279,7 +1548,7 @@ namespace PlsqlDevAgent.Harness
                 // shortening just below the budget changed one on every step from the 12th on (9 of 20)
                 Check($"over the budget earlier messages change only every few steps ({changed} of {requests.Count - 1} steps changed one)",
                     shortened && changed > 0 && changed <= 4);
-                _chat.ApplyConfigForTest(c => c.ContextBudgetChars = new AgentConfig().ContextBudgetChars);
+                _chat.ApplyConfigForTest(c => { c.ContextBudgetChars = new AgentConfig().ContextBudgetChars; c.ScaleWithContextWindow = true; });
                 Editor.Text = SampleCode;
                 await Js("document.getElementById('btnNew').click()");
                 await Task.Delay(600);
@@ -1301,7 +1570,7 @@ namespace PlsqlDevAgent.Harness
                 Editor.Text = SampleCode.Replace("end emp_api;\r\n", "") +
                               string.Concat(Enumerable.Range(1, 40).Select(i => $"  -- comment line {i} of the long package body\r\n")) +
                               "  procedure close_quarter is\r\n  begin\r\n    null;\r\n  end close_quarter;\r\nend emp_api;\r\n";
-                _chat.ApplyConfigForTest(c => c.MaxToolOutputChars = 2000);
+                _chat.ApplyConfigForTest(c => { c.MaxToolOutputChars = 2000; c.ScaleWithContextWindow = false; });
                 await SendAndWait("TOOL: get_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\"}");
                 src = LastToolResult();
                 var next = System.Text.RegularExpressions.Regex.Match(src, @"output limit reached after line (\d+) of 52\. NOT shown: .*close_quarter \(line (\d+)\).*start_line (\d+)");
@@ -1313,7 +1582,7 @@ namespace PlsqlDevAgent.Harness
                     Check("reading from the listed line returns that procedure", LastToolResult().Contains("lines 48-52 of 52") &&
                         LastToolResult().Contains("procedure close_quarter") && LastToolResult().Contains("end emp_api;"));
                 }
-                _chat.ApplyConfigForTest(c => c.MaxToolOutputChars = new AgentConfig().MaxToolOutputChars);
+                _chat.ApplyConfigForTest(c => { c.MaxToolOutputChars = new AgentConfig().MaxToolOutputChars; c.ScaleWithContextWindow = true; });
                 Editor.Text = SampleCode;
 
                 // 4. a query Oracle estimates as slow asks first; declined it does not run, approved it runs with the row limit inside

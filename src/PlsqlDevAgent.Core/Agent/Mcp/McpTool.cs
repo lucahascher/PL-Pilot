@@ -89,7 +89,7 @@ namespace PlsqlDevAgent.Agent.Mcp
             var watch = System.Diagnostics.Stopwatch.StartNew();
             var result = await _manager.CallToolAsync(ServerName, _info.Name, args ?? new JObject(), progress, ctx.Cancellation).ConfigureAwait(false);
             Log.Info($"MCP {ServerName}: {_info.Name} answered in {watch.Elapsed.TotalSeconds:0.0} s{((bool?)result["isError"] == true ? " (tool error)" : "")}");
-            var text = FormatResult(ServerName, _info.Name, result, Math.Max(2000, ctx.Config.MaxToolOutputChars), out bool isError);
+            var text = FormatResult(ServerName, _info.Name, result, Math.Max(2000, ctx.Config.ToolOutputLimit), out bool isError);
             if (isError) throw new McpException(L.T("{0} reported an error:", ServerName) + "\n" + text);
             return text;
         }

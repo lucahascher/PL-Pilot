@@ -12,7 +12,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
-    <Version>0.4.1</Version>
+    <Version>0.5.0</Version>
     <Product>PL/Pilot</Product>
     <Authors>Luca Hascher</Authors>
     <Company>Luca Hascher</Company>

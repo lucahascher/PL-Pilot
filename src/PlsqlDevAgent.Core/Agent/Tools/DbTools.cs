@@ -60,6 +60,16 @@ namespace PlsqlDevAgent.Agent.Tools
         public static string Truncate(string text, int max) =>
             text == null || text.Length <= max ? text : text.Substring(0, max) + $"\n... [truncated, {text.Length - max} more characters]";
 
+        /// <summary>Schemas of Oracle itself (left out of searches over all schemas, described by name only in dossiers).</summary>
+        public static readonly HashSet<string> SystemOwners = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "SYS", "SYSTEM", "XDB", "MDSYS", "CTXSYS", "ORDSYS", "WMSYS", "OLAPSYS", "LBACSYS", "DVSYS", "GSMADMIN_INTERNAL",
+            "APEX_PUBLIC_USER", "APEX_040000", "APEX_050000", "OUTLN", "DBSNMP", "APPQOSSYS", "ORDDATA", "AUDSYS", "OJVMSYS",
+        };
+
+        /// <summary><see cref="SystemOwners"/> as an SQL list of literals.</summary>
+        public static string SystemOwnersSql => string.Join(",", SystemOwners.OrderBy(o => o, StringComparer.Ordinal).Select(o => "'" + o + "'"));
+
         /// <summary>Reads a CLOB valued expression in chunks (the plug-in SQL interface returns strings).</summary>
         public static string ReadClob(ToolContext ctx, string clobExpression)
         {
@@ -335,7 +345,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 "select owner, object_name, object_type, status, to_char(last_ddl_time, 'YYYY-MM-DD HH24:MI') last_ddl " +
                 "from all_objects where object_type not in ('INDEX PARTITION','TABLE PARTITION','LOB','TABLE SUBPARTITION','INDEX SUBPARTITION')");
             if (owner != "*") sql.Append(" and owner = ").Append(Lit(owner == null ? ctx.CurrentSchema : Ident(owner)));
-            else sql.Append(" and owner not in ('SYS','SYSTEM','XDB','MDSYS','CTXSYS','ORDSYS','WMSYS','OLAPSYS','LBACSYS','DVSYS','GSMADMIN_INTERNAL','APEX_PUBLIC_USER','OUTLN','DBSNMP','APPQOSSYS','ORDDATA','AUDSYS','OJVMSYS')");
+            else sql.Append(" and owner not in (").Append(Db.SystemOwnersSql).Append(")");
             var like = Str(args, "name_like");
             if (!string.IsNullOrWhiteSpace(like)) sql.Append(" and object_name like ").Append(Lit(like.Trim().ToUpperInvariant()));
             var type = Str(args, "object_type");
@@ -343,7 +353,7 @@ namespace PlsqlDevAgent.Agent.Tools
             if (Bool(args, "only_invalid", false)) sql.Append(" and status = 'INVALID'");
             sql.Append(" order by owner, object_type, object_name");
             var r = ctx.Ide.Query(sql.ToString(), Math.Min(Int(args, "max_rows", 100), 500));
-            return Task.FromResult(r.Rows.Count == 0 ? "No matching objects." : FormatResult(r, ctx.Config.MaxToolOutputChars));
+            return Task.FromResult(r.Rows.Count == 0 ? "No matching objects." : FormatResult(r, ctx.Config.ToolOutputLimit));
         }
     }
 
@@ -388,10 +398,10 @@ namespace PlsqlDevAgent.Agent.Tools
                     sb.Append("Use get_object_source to see the definition of this object.");
                     break;
             }
-            return Task.FromResult(Db.Truncate(sb.ToString(), ctx.Config.MaxToolOutputChars));
+            return Task.FromResult(Db.Truncate(sb.ToString(), ctx.Config.ToolOutputLimit));
         }
 
-        private static void DescribeTable(ToolContext ctx, Db.ObjRef obj, StringBuilder sb, bool statistics)
+        internal static void DescribeTable(ToolContext ctx, Db.ObjRef obj, StringBuilder sb, bool statistics)
         {
             string o = Lit(obj.Owner), n = Lit(obj.Name);
             var comment = ctx.Ide.Query($"select comments from all_tab_comments where owner = {o} and table_name = {n}", 1);
@@ -508,7 +518,7 @@ namespace PlsqlDevAgent.Agent.Tools
             return r;
         }
 
-        private static void DescribeProgram(ToolContext ctx, Db.ObjRef obj, StringBuilder sb)
+        internal static void DescribeProgram(ToolContext ctx, Db.ObjRef obj, StringBuilder sb)
         {
             string o = Lit(obj.Owner), n = Lit(obj.Name);
             var where = obj.Type == "PACKAGE" || obj.Type == "TYPE"
@@ -575,7 +585,7 @@ namespace PlsqlDevAgent.Agent.Tools
             if (SourceTypes.Contains(obj.Type))
             {
                 // room for the header line and the notes; each unit is cut at a line boundary
-                int budget = ctx.Config.MaxToolOutputChars - 400;
+                int budget = ctx.Config.ToolOutputLimit - 400;
                 AppendSource(ctx, obj, obj.Type, numbers, from, to, ref budget, sb);
                 if (obj.Type == "PACKAGE" || obj.Type == "TYPE")
                 {
@@ -604,14 +614,14 @@ namespace PlsqlDevAgent.Agent.Tools
                 }
                 sb.Append(numbers ? TextEdit.WithLineNumbers(ddl, 0, 0) : ddl);
             }
-            return Task.FromResult(Db.Truncate($"-- {obj}\n" + sb, ctx.Config.MaxToolOutputChars));
+            return Task.FromResult(Db.Truncate($"-- {obj}\n" + sb, ctx.Config.ToolOutputLimit));
         }
 
         /// <summary>
         /// Appends lines from..to of one unit, at most <paramref name="budget"/> characters (cut at a line boundary,
         /// with a note where to continue). Only the lines that fit are transferred from the database.
         /// </summary>
-        private static void AppendSource(ToolContext ctx, Db.ObjRef obj, string type, bool numbers, int from, int to, ref int budget, StringBuilder sb)
+        internal static void AppendSource(ToolContext ctx, Db.ObjRef obj, string type, bool numbers, int from, int to, ref int budget, StringBuilder sb)
         {
             string unit = $"{type} {obj.Owner}.{obj.Name}";
             if (budget < 200)
@@ -714,7 +724,7 @@ namespace PlsqlDevAgent.Agent.Tools
             var sql = new StringBuilder("select owner, name, type, line, trim(text) text from all_source where upper(text) like ")
                 .Append(Lit("%" + text + "%")).Append(" escape '\\'");
             if (owner != "*") sql.Append(" and owner = ").Append(Lit(owner == null ? ctx.CurrentSchema : Ident(owner)));
-            else sql.Append(" and owner not in ('SYS','SYSTEM','XDB','MDSYS','CTXSYS','ORDSYS','WMSYS','OLAPSYS','LBACSYS','DVSYS','GSMADMIN_INTERNAL','APEX_040000','APEX_050000')");
+            else sql.Append(" and owner not in (").Append(Db.SystemOwnersSql).Append(")");
             var type = Str(args, "object_type");
             if (!string.IsNullOrWhiteSpace(type)) sql.Append(" and type = ").Append(Lit(type.Trim().ToUpperInvariant()));
             sql.Append(" order by owner, name, type, line");
@@ -728,7 +738,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 sb.Append($"{row[0]}.{row[1]} ({row[2]}) line {row[3]}: {line}\n");
             }
             if (r.Truncated) sb.Append("... more matches exist; narrow the search (owner, object_type) or raise max_rows.\n");
-            return Task.FromResult(Db.Truncate(sb.ToString(), ctx.Config.MaxToolOutputChars));
+            return Task.FromResult(Db.Truncate(sb.ToString(), ctx.Config.ToolOutputLimit));
         }
     }
 
@@ -752,7 +762,7 @@ namespace PlsqlDevAgent.Agent.Tools
                     "select name, type, line, position, attribute, asciistr(text) text from all_errors where owner = " + Lit(ctx.CurrentSchema) +
                     " order by name, type, sequence", 300);
                 foreach (var row in r.Rows) row[5] = UnAsciiStr(row[5]);
-                return Task.FromResult(r.Rows.Count == 0 ? "No compilation errors in schema " + ctx.CurrentSchema + "." : FormatResult(r, ctx.Config.MaxToolOutputChars, 500));
+                return Task.FromResult(r.Rows.Count == 0 ? "No compilation errors in schema " + ctx.CurrentSchema + "." : FormatResult(r, ctx.Config.ToolOutputLimit, 500));
             }
             SplitName(name, out var owner, out var n);
             owner = owner ?? ctx.CurrentSchema;
@@ -810,6 +820,13 @@ namespace PlsqlDevAgent.Agent.Tools
                            "Use execute_sql for other statements. Offending part starts with: " + RunQueryTool.OneLine(p);
             }
 
+            // objects that also have local source files: the database, the local files or both (asked once per chat)
+            var changed = new List<(string Type, string Owner, string Name)>();
+            foreach (var p in parts)
+                if (IsPlsqlUnit(PrepareStatement(p), out var t, out var o, out var n)) changed.Add((t, o ?? ctx.CurrentSchema, n));
+            var (proceed, localNote) = await LocalChanges.CheckAsync(ctx, changed);
+            if (!proceed) return localNote;
+
             var sensitive = parts.Select(SensitiveUnitReason).FirstOrDefault(r => r != null);
             if (!ctx.Config.AutoApproveSql || sensitive != null)
             {
@@ -824,7 +841,8 @@ namespace PlsqlDevAgent.Agent.Tools
                 if (!approval.Approved) return approval.RejectionMessage;
             }
 
-            return Compile(ctx, parts, "compile", Bool(args, "keep_settings", true));
+            var result = Compile(ctx, parts, "compile", Bool(args, "keep_settings", true));
+            return localNote == null ? result : result.TrimEnd() + "\n\n" + localNote;
         }
 
         /// <summary>
@@ -970,7 +988,7 @@ namespace PlsqlDevAgent.Agent.Tools
                     ctx.Ide.Execute("begin null; end;");
                     ctx.Changed(new ChangeRecord { Kind = ChangeRecord.NotUndoable, Label = RunQueryTool.OneLine(sql), TransactionId = ctx.Ide.PendingTransaction });
                 }
-                return FormatResult(r, ctx.Config.MaxToolOutputChars);
+                return FormatResult(r, ctx.Config.ToolOutputLimit);
             }
 
             // keep the current source of PL/SQL units / views that are about to be replaced or dropped (backup + rewind)
@@ -1047,7 +1065,7 @@ namespace PlsqlDevAgent.Agent.Tools
             else if (res.CompiledWithErrors) sb.Append("Executed, but the object has compilation errors (use get_compile_errors).");
             else sb.Append("FAILED: ").Append(res.ErrorMessage);
             if (seconds >= 1) sb.Append($" (The statement took {seconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} s.)");
-            if (!string.IsNullOrWhiteSpace(res.DbmsOutput)) sb.Append("\nDBMS_OUTPUT:\n").Append(Db.Truncate(res.DbmsOutput, ctx.Config.MaxToolOutputChars));
+            if (!string.IsNullOrWhiteSpace(res.DbmsOutput)) sb.Append("\nDBMS_OUTPUT:\n").Append(Db.Truncate(res.DbmsOutput, ctx.Config.ToolOutputLimit));
             if (res.Ok && IsDdl(sql))
             {
                 if (IsPlsqlUnit(sql, out var t, out var o, out var n)) ctx.Ide.RefreshObject(t, o ?? ctx.CurrentSchema, n, 2);

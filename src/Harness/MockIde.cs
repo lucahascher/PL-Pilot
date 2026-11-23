@@ -110,6 +110,24 @@ namespace PlsqlDevAgent.Harness
             else if (s.Contains("CURRENT_SCHEMA")) { r.Columns.Add("SCHEMA"); r.Rows.Add(new[] { CurrentSchema }); }
             else if (s.Contains("ALL_ERRORS")) { r.Columns.AddRange(new[] { "TYPE", "LINE", "POSITION", "ATTRIBUTE", "TEXT" }); }
             else if (s.Contains("COUNT(*)")) { r.Columns.Add("COUNT(*)"); r.Rows.Add(new[] { "14" }); }
+            // object dossier (explore_objects): status of the objects, table statistics, triggers
+            else if (s.Contains("FROM ALL_OBJECTS WHERE (OWNER, OBJECT_NAME) IN"))
+            {
+                r.Columns.AddRange(new[] { "OWNER", "OBJECT_NAME", "OBJECT_TYPE", "STATUS", "LAST_DDL" });
+                if (s.Contains("'EMP'")) r.Rows.Add(new[] { "SCOTT", "EMP", "TABLE", "VALID", "2026-11-01 08:00" });
+                if (s.Contains("'EMP_API'"))
+                {
+                    r.Rows.Add(new[] { "SCOTT", "EMP_API", "PACKAGE", "VALID", "2026-11-02 10:12" });
+                    r.Rows.Add(new[] { "SCOTT", "EMP_API", "PACKAGE BODY", "VALID", "2026-11-02 10:13" });
+                }
+            }
+            else if (s.Contains("FROM ALL_TABLES WHERE (OWNER, TABLE_NAME) IN"))
+            {
+                r.Columns.AddRange(new[] { "OWNER", "TABLE_NAME", "NUM_ROWS", "LAST_ANALYZED", "PARTITIONED", "TEMPORARY" });
+                if (s.Contains("'EMP'")) r.Rows.Add(new[] { "SCOTT", "EMP", "14", "2026-11-01", "NO", "N" });
+            }
+            else if (s.Contains("FROM ALL_USERS")) { r.Columns.Add("USERNAME"); foreach (var u in new[] { "SCOTT", "HR", "SYS" }) r.Rows.Add(new[] { u }); }
+            else if (s.Contains("FROM ALL_TRIGGERS")) r.Columns.AddRange(new[] { "OWNER", "TRIGGER_NAME", "TRIGGER_TYPE", "TRIGGERING_EVENT", "STATUS" });
             else if (s.Contains("FROM ALL_OBJECTS") && s.Contains(" LIKE "))
             {
                 r.Columns.AddRange(new[] { "OWNER", "OBJECT_NAME", "OBJECT_TYPE" });

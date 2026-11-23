@@ -49,6 +49,9 @@ It was written for locked-down company PCs: it installs **without administrator 
 - **Knows your database.** Knows the Oracle version and NLS settings of the connection, describes tables
   (with optimizer statistics) and packages, searches source code, reads object DDL, runs `EXPLAIN PLAN`, lists
   compile errors — and attaches objects or files you mention with `@NAME`.
+- **Gets the picture in one step.** `explore_objects` returns a dossier of several objects at once: their full
+  source or structure, the tables and packages they use, the code that calls or writes them (with the lines) and
+  the foreign-key neighbours. With a large context window this replaces a dozen slow look-up round trips.
 - **Impact analysis and error stacks.** Shows what uses an object, down to the source lines that use a single
   column; names the objects a change invalidated and recompiles them. Paste an error stack (`ORA-06512` lines in
   any language, or a call stack) and it shows the source line of every frame.
@@ -126,14 +129,31 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
   `/new`, `/help`, plus your own (`/name = prompt` in the settings or `.plsqlagent/commands/<name>.md`) and the
   prompts of your MCP servers as `/server:prompt arguments` (values in order — the last one takes the rest — or
   `name=value`; the server fills in the prompt, which becomes your message).
-- **Attach context:** `@EMP_API`, `@SCOTT.EMP`, `@scripts/deploy.sql` attach source, table descriptions or files;
+- **Attach context:** `@EMP_API`, `@SCOTT.EMP`, `@scripts/deploy.sql` attach files and an object dossier of the
+  mentioned database objects (as `explore_objects` builds it: source or structure plus neighbourhood);
   `@server:name` attaches a resource of an MCP server — by its name, its URI, or a value for a resource template
   (`@tickets:ticket/PLS-101`, or just `@tickets:PLS-101` if the server has one template).
   While you type after `@`, matching objects are looked up in the database; turn this off with the setting
   *Suggest Objects After @* (the mention still works when you send the message). MCP resources are suggested
   from the server's list without any lookup.
+- **Active window:** the window you have open in PL/SQL Developer is shown above the input. The agent is told it
+  may be unrelated to your request and reads it only when the request is about it. Click it to cross it out: the
+  agent then does not see it and the editor tools refuse to read or change it (remembered per window until you
+  click it again).
+- **Progress:** while the agent works, the line under the input shows what it is doing right now (waiting for the
+  model, thinking with its latest thought, running a tool, waiting for your approval) and for how long, plus the
+  step, the total time and the tokens generated so far. Every tool call shows its duration, and each answer ends
+  with the total time, model turns and tool calls. Before tool calls the agent writes one sentence saying what it
+  does next.
 - **Agent / Plan mode:** in *Plan* mode the agent only investigates and proposes a plan; *Execute plan*
   then carries it out.
+- **Working method:** the fixed rules (also with your own base prompt) make the agent work toward a defined result in
+  few, large, purposeful steps: one broad read instead of many narrow ones, complete changes compiled once, short
+  reasoning, a different approach after two failures. For large databases they add a strategy: start from the
+  named objects and follow real references, locate with one targeted search before reading, learn the naming
+  conventions, qualify other schemas, hand broad questions to parallel helpers, explore only as far as the task
+  needs. After 10 model turns in a row that only looked things up, the agent gets a note to check what is still
+  missing and act (shown as a notice in the chat).
 - **Longer tasks:** the agent keeps a task list above the input and continues by itself while tasks are
   open; `run_subtask` lets helper agents research in parallel with their own context.
 - **Code blocks** in answers: copy, insert at the cursor, replace the selection or open in a new SQL window.
@@ -148,15 +168,23 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 
 | Area | Tools |
 |---|---|
-| Planning | `update_tasks`, `run_subtask` |
+| Planning | `update_tasks`, `run_subtask`, `ask_user` (a question with answer buttons) |
 | IDE | `get_ide_context`, `get_editor_text`, `get_selected_text`, `edit_editor`, `set_editor_text`, `open_new_window`, `open_object`, `get_result_grid` |
-| Database (read) | `run_query`, `list_objects`, `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `measure_sql`¹, `find_dependencies`, `resolve_error_stack`, `list_backups` |
+| Database (read) | `run_query`, `list_objects`, `explore_objects`², `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `measure_sql`¹, `find_dependencies`, `resolve_error_stack`, `list_backups` |
 | Database (change, with approval) | `compile_plsql`, `execute_sql`, `recompile_invalid`, `run_unit_tests`, `restore_backup` |
-| Project folder (optional) | `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `open_file_in_ide` |
+| Project folder (optional) | `list_files`, `find_object_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `open_file_in_ide` |
 | External systems (optional) | the tools of your MCP servers, named `<server>__<tool>`, e.g. `tickets__get_ticket` |
 
 ¹ Queries only read. INSERT / UPDATE / DELETE / MERGE are measured only with your approval and rolled back
 afterwards; not in plan mode or on protected connections.
+
+² One call, several objects. Per object: PL/SQL units with their complete specification and body; tables with
+columns and comments, keys, indexes, size, triggers (with source) and the tables that reference them; views with
+columns and query. Plus what each object uses (tables and views compactly with columns, keys and comments;
+specifications of called packages), which objects use it with the source lines that name it (lines that write a
+table are marked), and with `depth` 2–3 the data model further along the foreign keys. The dictionary queries are
+batched, so a dossier costs a few dozen small queries however many neighbours there are. No table data is read.
+Whatever does not fit the size limit is listed by name at the end.
 
 Large PL/SQL units are read in parts: `get_object_source` takes `start_line` / `end_line`, and a unit longer
 than the output limit ends with a list of the subprograms it did not show, with their line numbers.
@@ -230,10 +258,22 @@ Most settings are self-explanatory in the settings page; a few worth knowing:
   e.g. on a network share so the whole team uses one version — *Edit…* starts from a template with
   typical PL/SQL conventions), **project rules** (`AGENTS.md` in the project folder) and **personal
   instructions**. *Preview Effective System Prompt* shows exactly what the model receives.
-- **Project folder** enables the file tools, `AGENTS.md` and project commands.
+- **Project folder** enables the file tools, `AGENTS.md` and project commands. Point it at the folder with your local
+  source files (the ones you commit to version control); sub folders, e.g. one per schema, are included. PL/Pilot
+  indexes which file contains which database object (from the `CREATE` statements; the schema comes from the
+  statement or else from a folder named like a schema), shows the local files in every dossier together with
+  whether they are identical to the database version, and `find_object_files` lists them for any object. The first
+  time in a chat the agent changes an object that also has local files, PL/Pilot asks you where changes go:
+  *Database*, *Local files* (the agent edits every affected file and does not compile) or *Both*. The choice is
+  shown above the input; click it to be asked again.
 - **Use DBA views** makes every query of the agent read `DBA_` instead of `ALL_` dictionary views (falls
   back to `ALL_` without `SELECT_CATALOG_ROLE`).
 - **Sub-task model** lets helper agents use a smaller, faster model.
+- **Size limits** follow the context window (*Limits Follow Context Window*, on by default): one tool result may
+  use 5 % of the window (at least *Max Tool Result*, 40,000 characters), older tool results are shortened only
+  above 65 % (at least *Conversation Budget*, 300,000 characters), and an object dossier may use 20 % (at most
+  400,000 characters; *Object Dossier* sets a fixed size). A 128k model keeps the old limits; with a 1M model a
+  dossier can hold several large packages. The settings page shows the limits in effect.
 - **External tools (MCP):** *Add MCP Server*, enter a short name (it prefixes the tool names), the URL —
   Streamable HTTP, usually `http://server:port/mcp`, or `…/sse` for older servers — and optional HTTP
   headers such as `Authorization: Bearer …` (stored encrypted). *Test* connects and lists the tools; set each

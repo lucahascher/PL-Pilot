@@ -150,7 +150,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 && statements.All(s => IsReadOnlyQuery(s, out _)))
                 sameRows = SameRows(ctx, statements[0], statements[1], binds, results[0].Rows, results[1].Rows);
 
-            return Db.Truncate(Report(results, runs, access, sameRows), ctx.Config.MaxToolOutputChars);
+            return Db.Truncate(Report(results, runs, access, sameRows), ctx.Config.ToolOutputLimit);
         }
 
         // ---------------------------------------------------------------- measuring

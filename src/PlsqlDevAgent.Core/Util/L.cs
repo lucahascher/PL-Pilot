@@ -194,6 +194,15 @@ namespace PlsqlDevAgent.Util
             // mentions
             ["not found"] = "nicht gefunden",
             ["{0}, {1} lines"] = "{0}, {1} Zeilen",
+            ["{0}, dossier"] = "{0}, Dossier",
+            ["The agent has looked things up {0} times in a row without a result: reminded it to focus on the task."] =
+                "Der Agent hat {0}-mal hintereinander nachgeschlagen, ohne zu einem Ergebnis zu kommen: Er wurde daran erinnert, sich auf die Aufgabe zu konzentrieren.",
+            // database or local files
+            ["Database"] = "Datenbank",
+            ["Local files"] = "Lokale Dateien",
+            ["Both"] = "Beides",
+            ["{0} also exists in local files of the project folder ({1}). Where should the agent make changes in this chat?"] =
+                "{0} gibt es auch in lokalen Dateien des Projektordners ({1}). Wo soll der Agent in diesem Chat Änderungen vornehmen?",
             // /help
             ["**Commands** (type `/` in the input box):"] = "**Befehle** (im Eingabefeld `/` tippen):",
             ["Own commands: Settings → Custom commands, or `.plsqlagent/commands/<name>.md` in the project folder. Mention objects or files with `@NAME` to attach their source."] =

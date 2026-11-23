@@ -151,7 +151,7 @@ namespace PlsqlDevAgent.Agent.Tools
                 if (!cov.Ok) sb.Append("failed: ").Append(cov.ErrorMessage.Trim());
                 else sb.Append(CoverageSummary(cov.DbmsOutput) ?? "no coverage data (" + Db.Truncate((cov.DbmsOutput ?? "").Trim(), 500) + ")");
             }
-            return Db.Truncate(sb.ToString(), ctx.Config.MaxToolOutputChars);
+            return Db.Truncate(sb.ToString(), ctx.Config.ToolOutputLimit);
         }
 
         /// <summary>

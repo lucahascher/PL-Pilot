@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -178,6 +179,7 @@ namespace PlsqlDevAgent.Testing
                 Line($"IDE version {c.IdeVersion}, connection: {c.ConnectionLabel}");
                 var ctx = new ToolContext { Ide = plugin.Ide, Config = AgentConfig.Load(), RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
                 await AnalysisChecks(ctx, plugin.Ide);
+                await ExploreChecks(ctx);
                 await MeasureChecks(ctx, plugin.Ide);
                 await UnitTestChecks(ctx, plugin.Ide);
                 Line($"\n**Total: {_pass} passed, {_fail} failed**");
@@ -219,6 +221,85 @@ namespace PlsqlDevAgent.Testing
             "  end show_stack;\n" +
             "end pda_an_pkg;\n" +
             "/\n";
+
+        /// <summary>
+        /// Object dossiers (explore_objects) against the real database: a small data model (customer ← order ← item)
+        /// with a trigger, a view, a package that reads and writes it and a procedure that calls the package.
+        /// </summary>
+        private static async Task ExploreChecks(ToolContext ctx)
+        {
+            Line("\n## 12b. Object dossiers (explore_objects)");
+            var schema = await Task.Run(() => ctx.CurrentSchema);
+            async Task<string> Exec(string sql, string expect = null) => await Tool(ctx, "execute_sql", new JObject { ["sql"] = sql }, expect);
+            var drops = new[] { "drop procedure pda_ex_p", "drop package pda_ex_pkg", "drop view pda_ex_open_v", "drop sequence pda_ex_order_seq",
+                                "drop table pda_ex_item purge", "drop table pda_ex_order purge", "drop table pda_ex_customer purge" };
+            foreach (var drop in drops) await Exec(drop);
+            try
+            {
+                Line("\n### Setup");
+                await Exec("create table pda_ex_customer (id number constraint pda_ex_customer_pk primary key, name varchar2(100) not null, email varchar2(200))", "Executed successfully");
+                await Exec("comment on column pda_ex_customer.email is 'Contact address for invoices'", "Executed successfully");
+                await Exec("create table pda_ex_order (id number constraint pda_ex_order_pk primary key, " +
+                           "customer_id number not null constraint pda_ex_order_customer_fk references pda_ex_customer, amount number(12,2), status varchar2(1) default 'O' not null)",
+                           "Executed successfully");
+                await Exec("comment on column pda_ex_order.status is 'O = open, C = closed'", "Executed successfully");
+                await Exec("create table pda_ex_item (id number constraint pda_ex_item_pk primary key, " +
+                           "order_id number not null constraint pda_ex_item_order_fk references pda_ex_order, qty number)", "Executed successfully");
+                await Exec("create sequence pda_ex_order_seq", "Executed successfully");
+                await Exec("create or replace trigger pda_ex_order_trg\nbefore insert on pda_ex_order\nfor each row\nbegin\n" +
+                           "  if :new.id is null then\n    :new.id := pda_ex_order_seq.nextval;\n  end if;\nend;", "Executed successfully");
+                await Tool(ctx, "compile_plsql", new JObject
+                {
+                    ["source"] = "create or replace view pda_ex_open_v as select id, customer_id, amount from pda_ex_order where status = 'O'\n/\n" +
+                                 "create or replace package pda_ex_pkg is\n  procedure place(p_customer_id in number, p_amount in number);\n" +
+                                 "  function open_total(p_customer_id in number) return number;\nend pda_ex_pkg;\n/\n" +
+                                 "create or replace package body pda_ex_pkg is\n  procedure place(p_customer_id in number, p_amount in number) is\n    l_name pda_ex_customer.name%type;\n  begin\n" +
+                                 "    select name into l_name from pda_ex_customer where id = p_customer_id;\n" +
+                                 "    insert into pda_ex_order (customer_id, amount) values (p_customer_id, p_amount);\n  end place;\n\n" +
+                                 "  function open_total(p_customer_id in number) return number is\n    l_sum number;\n  begin\n" +
+                                 "    select sum(amount) into l_sum from pda_ex_open_v where customer_id = p_customer_id;\n    return nvl(l_sum, 0);\n  end open_total;\nend pda_ex_pkg;\n/\n" +
+                                 "create or replace procedure pda_ex_p is\nbegin\n  pda_ex_pkg.place(1, 10);\nend pda_ex_p;\n/\n",
+                }, "compiled successfully");
+
+                Line("\n### Dossiers");
+                var sw = Stopwatch.StartNew();
+                var pkg = await Tool(ctx, "explore_objects", new JObject { ["names"] = new JArray("pda_ex_pkg") }, "## PACKAGE " + schema + ".PDA_EX_PKG");
+                var ms = sw.ElapsedMilliseconds;
+                Check("package dossier: specification and body, the used tables described with columns and foreign key, the view, the caller's line",
+                    pkg.Contains("procedure place(p_customer_id") && pkg.Contains("insert into pda_ex_order") &&
+                    pkg.Contains($"TABLE {schema}.PDA_EX_ORDER – used by PDA_EX_PKG") && pkg.Contains("CUSTOMER_ID NUMBER NOT NULL") &&
+                    pkg.Contains($"FK (CUSTOMER_ID) → {schema}.PDA_EX_CUSTOMER") && pkg.Contains($"VIEW {schema}.PDA_EX_OPEN_V") &&
+                    pkg.Contains($"PROCEDURE {schema}.PDA_EX_P") && pkg.Contains("line 3: pda_ex_pkg.place(1, 10);"));
+                Check($"package dossier in {ms} ms ({pkg.Length} chars)", ms < 10000);
+
+                var order = await Tool(ctx, "explore_objects", new JObject { ["names"] = new JArray("PDA_EX_ORDER") }, "## TABLE " + schema + ".PDA_EX_ORDER");
+                Check("table dossier: column comment, incoming foreign key, trigger with source, the package's writing line, the view as a user",
+                    order.Contains("O = open, C = closed") && order.Contains($"{schema}.PDA_EX_ITEM (ORDER_ID) → PDA_EX_ORDER") &&
+                    order.Contains($"TRIGGER {schema}.PDA_EX_ORDER_TRG") && order.Contains("pda_ex_order_seq.nextval") &&
+                    Regex.IsMatch(order, @"line \d+ \(writes\): insert into pda_ex_order") && order.Contains($"VIEW {schema}.PDA_EX_OPEN_V") &&
+                    order.Contains($"TABLE {schema}.PDA_EX_CUSTOMER – foreign-key neighbour of PDA_EX_ORDER") && order.Contains("Contact address for invoices"));
+
+                var hop1 = await Tool(ctx, "explore_objects", new JObject { ["names"] = new JArray("pda_ex_customer") }, "PDA_EX_ORDER");
+                var hop2 = await Tool(ctx, "explore_objects", new JObject { ["names"] = new JArray("pda_ex_customer"), ["depth"] = 2 }, "PDA_EX_ITEM");
+                Check("depth 1 shows the direct neighbour only, depth 2 also the table that references it",
+                    !hop1.Contains("PDA_EX_ITEM") && hop2.Contains($"TABLE {schema}.PDA_EX_ITEM – foreign-key neighbour of PDA_EX_ORDER (hop 2)"));
+
+                var both = await Tool(ctx, "explore_objects", new JObject { ["names"] = new JArray("pda_ex_pkg", "pda_ex_order", "pda_ex_pkg.place", "pda_ex_nothing") }, "# Dossier:");
+                Check("several names in one call: each object once, PACKAGE.SUBPROGRAM shows the package, unknown names noted",
+                    Regex.Matches(both, "^## ", RegexOptions.Multiline).Count >= 2 && Regex.Matches(both, $"^## PACKAGE {schema}.PDA_EX_PKG$", RegexOptions.Multiline).Count == 1 &&
+                    both.Contains("pda_ex_nothing: no such object") && !both.Contains($"TABLE {schema}.PDA_EX_ORDER – used by"));
+
+                var dbaCfg = ctx.Config.Clone();
+                dbaCfg.UseDbaViews = true;
+                var dbaCtx = new ToolContext { Ide = ctx.Ide, Config = dbaCfg, RequestApproval = ctx.RequestApproval };
+                var dba = await Tool(dbaCtx, "explore_objects", new JObject { ["names"] = new JArray("pda_ex_pkg") }, "## PACKAGE " + schema + ".PDA_EX_PKG");
+                Check("the same package dossier with the DBA views setting", dba == pkg);
+            }
+            finally
+            {
+                foreach (var drop in drops) await Exec(drop);
+            }
+        }
 
         /// <summary>
         /// Database facts for the system prompt, compiler settings kept and warnings reported, impact analysis,
@@ -393,6 +474,13 @@ namespace PlsqlDevAgent.Testing
                     return segment;
                 }
 
+                var s0 = await Ask("Erkläre mir, was PDA_LLM_PKG macht und welche Tabellen und Views es verwendet. Nichts ändern.");
+                int explore = s0.IndexOf("explore_objects", StringComparison.Ordinal);
+                var lookups = new[] { "get_object_source", "describe_object", "search_source", "run_query" }.Select(t => s0.IndexOf(t, StringComparison.Ordinal)).Where(i => i >= 0).ToList();
+                Check("unknown objects: the model's first database call is explore_objects", explore >= 0 && lookups.All(i => i > explore));
+                // a new chat: with the package already in context the model answers the error stack without any tool
+                await chat.ExecuteScriptAsync("document.getElementById('btnNew').click()");
+                await Task.Delay(1000);
                 var s1 = await Ask("Dieser Fehler kommt aus unserem Anwendungs-Log. Was ist die Ursache und wie behebe ich ihn? Noch nichts ändern.\n\n" + error);
                 Check("pasted error stack: the model calls resolve_error_stack", s1.Contains("resolve_error_stack"));
                 var s2 = await Ask("Wir wollen die Spalte AMOUNT der Tabelle PDA_LLM_ORDER in NET_AMOUNT umbenennen. Welche Objekte wären betroffen? Nichts ändern.");
@@ -416,6 +504,37 @@ namespace PlsqlDevAgent.Testing
                                "and object_name like '%PDA_LLM%') loop execute immediate 'drop package ' || r.object_name; end loop; end;");
                 }
                 else Check("/test without utPLSQL: the model opens a Test window", s4.Contains("open_new_window") || s4.Contains("Test window") || s4.Contains("Test-Fenster"));
+
+                // local source files: the package also exists in the project folder (spec and body in a schema sub folder);
+                // the model should ask where to change it (the "user" answers: local files) and edit the body file only
+                var project = Path.Combine(_dir, "project");
+                if (Directory.Exists(project)) Directory.Delete(project, true);
+                var bodyFile = Path.Combine(project, ide.GetContext().User.ToUpperInvariant(), "packages", "pda_llm_pkg.pkb");
+                Directory.CreateDirectory(Path.GetDirectoryName(bodyFile));
+                var source = await Task.Run(() => Db.CurrentSource(ctx, "PACKAGE BODY", ide.GetContext().User.ToUpperInvariant(), "PDA_LLM_PKG"));
+                var spec = await Task.Run(() => Db.CurrentSource(ctx, "PACKAGE", ide.GetContext().User.ToUpperInvariant(), "PDA_LLM_PKG"));
+                File.WriteAllText(Path.ChangeExtension(bodyFile, ".pks"), spec + "\r\n/\r\n");
+                File.WriteAllText(bodyFile, source + "\r\n/\r\n");
+                var original = File.ReadAllText(bodyFile);
+                chat.ApplyConfigForTest(c => c.WorkspaceDir = project);
+                await chat.ExecuteScriptAsync("document.getElementById('btnNew').click()");
+                await Task.Delay(1000);
+                await chat.ExecuteScriptAsync(@"setInterval(() => {
+                    const q = document.querySelector('.approval.question:not(.done)'); if (!q) return;
+                    window.pdaQuestion = q.querySelector('.ahead').innerText;
+                    const b = Array.from(q.querySelectorAll('button')).find(x => /lokal|local/i.test(x.innerText));
+                    if (b) b.click(); else { const i = q.querySelector('input'); i.value = 'Nur die lokalen Dateien'; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); }
+                  }, 1500);");
+                var s5 = await Ask("Ändere pda_llm_pkg.avg_amount so, dass für Kunden ohne Bestellungen 0 zurückgegeben wird statt eines Fehlers.", 10);
+                var asked = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("window.pdaQuestion || ''") ?? "\"\"");
+                var changedLocally = File.ReadAllText(bodyFile) != original;
+                var dbUnchanged = await Task.Run(() => ide.Query(
+                    "select count(*) from user_source where name = 'PDA_LLM_PKG' and type = 'PACKAGE BODY' and text like '%nvl(l_sum, 0) / l_cnt%'", 1).Rows[0][0] == "1");
+                Line($"Question of the model: {asked}");
+                Check("local files: the user is asked where to change the package", asked.Length > 0);
+                Check($"answer 'local files': the body file is changed ({changedLocally}), the database is not ({dbUnchanged})", changedLocally && dbUnchanged);
+                chat.ApplyConfigForTest(c => c.WorkspaceDir = "");
+
                 var transcript = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"");
                 File.WriteAllText(Path.Combine(_dir, "transcript-tools.txt"), transcript ?? "", Encoding.UTF8);
                 Line($"\n**Total: {_pass} passed, {_fail} failed**");
@@ -436,7 +555,7 @@ namespace PlsqlDevAgent.Testing
         /// matching <paramref name="protectedTitle"/>, a JS regex) no, with German feedback; counts window.pdaRejected.
         /// </summary>
         private static string CarefulApprover(string protectedTitle = null) => @"setInterval(() => {
-            const c = document.querySelector('.approval:not(.done)'); if (!c) return;
+            const c = document.querySelector('.approval:not(.done):not(.question)'); if (!c) return;
             const title = (c.querySelector('.ahead') || c).innerText;
             let reason = null;
             if (c.querySelector('.warn')) reason = 'Nein - keine bestehenden Daten löschen oder ändern.';
@@ -950,8 +1069,8 @@ namespace PlsqlDevAgent.Testing
                 Check("line 1500 is numbered 1500 and has the stored text", range.Contains("1500: " + line1500.TrimEnd('\n', '\r')) && !range.Contains("1506:"));
                 var whole = await Tool(ctx, "get_object_source", new JObject { ["name"] = "pda_big_src" }, "output limit reached after line");
                 var cont = System.Text.RegularExpressions.Regex.Match(whole, $@"PACKAGE BODY \S+: output limit reached after line (\d+) of {total}\. NOT shown: .*start_line (\d+)");
-                Check($"the whole package fits the output limit ({whole.Length} of {cfg.MaxToolOutputChars} chars) and says where to continue",
-                    whole.Length <= cfg.MaxToolOutputChars && cont.Success && int.Parse(cont.Groups[2].Value) == int.Parse(cont.Groups[1].Value) + 1);
+                Check($"the whole package fits the output limit ({whole.Length} of {cfg.ToolOutputLimit} chars) and says where to continue",
+                    whole.Length <= cfg.ToolOutputLimit && cont.Success && int.Parse(cont.Groups[2].Value) == int.Parse(cont.Groups[1].Value) + 1);
                 Check("the cut is announced at the top and the procedures not shown are listed with their lines (p300 at line 2693)",
                     whole.Contains("too long for one answer") && whole.Contains("p300 (line 2693)"));
                 if (cont.Success)
@@ -996,7 +1115,7 @@ namespace PlsqlDevAgent.Testing
                 })
                 {
                     var limited = await QueryRunner.RunAsync(ctx, sql, 5);
-                    var plain = SqlUtil.FormatResult(await Task.Run(() => ide.Query(sql, 5)), cfg.MaxToolOutputChars);
+                    var plain = SqlUtil.FormatResult(await Task.Run(() => ide.Query(sql, 5)), cfg.ToolOutputLimit);
                     Check("row limit inside the query, same result: " + sql, limited == plain);
                 }
 
@@ -1300,6 +1419,7 @@ namespace PlsqlDevAgent.Testing
                 await TransactionChecks(ide, cfg);
                 await SecurityChecks(ide, cfg);
                 await AnalysisChecks(ctx, ide);
+                await ExploreChecks(ctx);
                 await MeasureChecks(ctx, ide);
                 await UnitTestChecks(ctx, ide);
                 Line($"\n**Tool tests: {_pass} passed, {_fail} failed**");
@@ -1401,7 +1521,7 @@ namespace PlsqlDevAgent.Testing
                 Line("# PL/Pilot – read costs through the plug-in interface");
                 var cfg = AgentConfig.Load();
                 var ctx = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
-                Line($"Separate session: {ide.UsesOwnSession}; MaxToolOutputChars {cfg.MaxToolOutputChars}\n");
+                Line($"Separate session: {ide.UsesOwnSession}; tool output limit {cfg.ToolOutputLimit} chars, dossier {cfg.ExploreOutputLimit}\n");
                 Line("| What | runs | median ms | min | max | result |");
                 Line("|---|---|---|---|---|---|");
 

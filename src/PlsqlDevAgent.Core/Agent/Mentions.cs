@@ -22,11 +22,6 @@ namespace PlsqlDevAgent.Agent
             @"(?<![\w@])@(?<m>(?:[\w.\-]+[/\\])+[\w.\-]+|[A-Za-z][\w$#]*(?:\.[A-Za-z][\w$#]*)?)",
             RegexOptions.Compiled);
 
-        private static readonly HashSet<string> SourceTypes = new HashSet<string>
-        {
-            "PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY", "VIEW", "JAVA SOURCE",
-        };
-
         public static List<string> Parse(string text) =>
             MentionRegex.Matches(text ?? "").Cast<Match>().Select(m => m.Groups["m"].Value.TrimEnd('.')).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
@@ -64,14 +59,14 @@ namespace PlsqlDevAgent.Agent
             if (mentions.Count == 0 && mcp.Count == 0) return ("", items);
 
             var sb = new StringBuilder("\n\n<attachments>\n");
-            int budget = ctx.Config.MaxToolOutputChars * 3;
+            int budget = ctx.Config.ToolOutputLimit * 3;
             foreach (var (server, reference) in mcp.Take(10))
             {
                 var label = server + ":" + reference;
                 try
                 {
                     var (uri, content) = await ctx.Mcp.ReadMentionAsync(server, reference, ctx.Cancellation).ConfigureAwait(false);
-                    content = Db.Truncate(content.Replace("\r\n", "\n").TrimEnd(), Math.Max(2000, Math.Min(ctx.Config.MaxToolOutputChars, budget)));
+                    content = Db.Truncate(content.Replace("\r\n", "\n").TrimEnd(), Math.Max(2000, Math.Min(ctx.Config.ToolOutputLimit, budget)));
                     budget -= content.Length;
                     items.Add(new JObject { ["label"] = label, ["ok"] = true, ["detail"] = Util.L.T("{0}, {1} lines", Util.L.T("MCP resource"), content.Split('\n').Length) });
                     sb.Append($"<attachment name=\"{label}\" kind=\"MCP resource\">\n{Mcp.McpTool.WrapExternal(server, "resource", uri, content)}\n</attachment>\n");
@@ -85,6 +80,9 @@ namespace PlsqlDevAgent.Agent
                     sb.Append($"<attachment name=\"{label}\">(could not be read: {message})</attachment>\n");
                 }
             }
+            // database objects all go into one dossier (shared budget, related objects described once)
+            Dossier dossier = null;
+            var objects = new List<Db.ObjRef>();
             foreach (var mention in mentions.Take(10))
             {
                 string kind = null, label = mention, content = null;
@@ -99,20 +97,17 @@ namespace PlsqlDevAgent.Agent
                     }
                     else if (ctx.Ide.GetContext().Connected)
                     {
-                        var obj = Db.Resolve(ctx, mention, null).FirstOrDefault();
-                        if (obj == null && mention.Contains('.'))
-                            obj = Db.Resolve(ctx, mention.Split('.')[0], null).FirstOrDefault(); // PACKAGE.PROCEDURE
+                        dossier = dossier ?? new Dossier(ctx, ctx.DossierLimit, 1);
+                        var obj = dossier.Add(mention); // also PACKAGE.PROCEDURE and synonyms
                         if (obj != null)
                         {
-                            kind = obj.Type;
-                            label = $"{obj.Owner}.{obj.Name}";
-                            var args = new JObject { ["name"] = label, ["object_type"] = obj.Type };
-                            AgentTool tool = SourceTypes.Contains(obj.Type) ? (AgentTool)new GetObjectSourceTool() : new DescribeObjectTool();
-                            content = await tool.ExecuteAsync(args, ctx);
-                            if (obj.Type == "VIEW") content = await new DescribeObjectTool().ExecuteAsync(args, ctx) + "\n\n" + content;
+                            objects.Add(obj);
+                            items.Add(new JObject { ["label"] = $"{obj.Owner}.{obj.Name}", ["ok"] = true, ["detail"] = Util.L.T("{0}, dossier", obj.Type.ToLowerInvariant()) });
+                            continue;
                         }
                     }
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     Util.Log.Warn($"Resolving @{mention} failed: {ex.Message}");
@@ -124,11 +119,24 @@ namespace PlsqlDevAgent.Agent
                     sb.Append($"<attachment name=\"{mention}\">(could not be resolved: no such file or database object)</attachment>\n");
                     continue;
                 }
-                content = Db.Truncate(content, Math.Max(2000, Math.Min(ctx.Config.MaxToolOutputChars, budget)));
+                content = Db.Truncate(content, Math.Max(2000, Math.Min(ctx.Config.ToolOutputLimit, budget)));
                 budget -= content.Length;
                 int lines = content.Split('\n').Length;
                 items.Add(new JObject { ["label"] = label, ["ok"] = true, ["detail"] = Util.L.T("{0}, {1} lines", kind.ToLowerInvariant(), lines) });
                 sb.Append($"<attachment name=\"{label}\" kind=\"{kind}\">\n{content.Replace("\r\n", "\n").TrimEnd()}\n</attachment>\n");
+            }
+            if (objects.Count > 0)
+            {
+                var names = string.Join(", ", objects.Select(o => $"{o.Owner}.{o.Name}"));
+                string content;
+                try { content = await Task.Run(() => dossier.Build(), ctx.Cancellation).ConfigureAwait(false); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    Util.Log.Warn($"Dossier of @{names} failed: {ex.Message}");
+                    content = $"(the dossier could not be built: {ex.GetBaseException().Message}; use explore_objects)";
+                }
+                sb.Append($"<attachment name=\"{names}\" kind=\"object dossier\">\n{content.Replace("\r\n", "\n").TrimEnd()}\n</attachment>\n");
             }
             sb.Append("</attachments>");
             return (sb.ToString(), items);

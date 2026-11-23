@@ -2,8 +2,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,4,1,0
- PRODUCTVERSION 0,4,1,0
+ FILEVERSION 0,5,0,0
+ PRODUCTVERSION 0,5,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -16,12 +16,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Luca Hascher"
             VALUE "FileDescription", "PL/Pilot - AI coding agent plug-in for PL/SQL Developer"
-            VALUE "FileVersion", "0.4.1.0"
+            VALUE "FileVersion", "0.5.0.0"
             VALUE "InternalName", "PlsqlDevAgent"
             VALUE "LegalCopyright", "Copyright (C) 2026 Luca Hascher"
             VALUE "OriginalFilename", "PlsqlDevAgent.dll"
             VALUE "ProductName", "PL/Pilot"
-            VALUE "ProductVersion", "0.4.1.0"
+            VALUE "ProductVersion", "0.5.0.0"
         END
     END
     BLOCK "VarFileInfo"

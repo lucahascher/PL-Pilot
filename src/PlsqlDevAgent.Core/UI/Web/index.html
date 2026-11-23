@@ -190,6 +190,24 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
 #btnSend.stop { color: var(--fg); }
 .hint { color: var(--desc); font-size: 11px; margin-top: 4px; display: none; align-items: center; gap: 6px; }
 .hint.busy { display: flex; }
+.hint .act { color: var(--fg); white-space: nowrap; }
+.hint .thought { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
+.hint .totals { white-space: nowrap; margin-left: auto; }
+/* the active editor window above the input: click to exclude it from the chat (crossed out) */
+.winrow { display: none; margin: 0 0 4px; gap: 6px; min-width: 0; }
+.winrow.show { display: flex; }
+.winchip.hidden { display: none; }
+.winchip.target { flex: none; }
+.winchip { font-size: 11px; border: 1px solid var(--widget-border); border-radius: 3px; padding: 1px 6px; background: var(--editor); color: var(--fg);
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; line-height: 16px; }
+.winchip:hover { background: var(--hover); }
+.winchip .ic { width: 12px; height: 12px; flex: none; }
+.winchip .wl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.winchip.excluded { color: var(--desc); border-style: dashed; }
+.winchip.excluded .wl { text-decoration: line-through; }
+.tool .tdur { font-size: 11px; color: var(--desc); white-space: nowrap; padding: 0 6px; }
+.runsum { color: var(--desc); font-size: 11px; margin: 2px 0 6px; display: flex; align-items: center; gap: 5px; }
+.runsum .ic { width: 12px; height: 12px; }
 .meter { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--desc); white-space: nowrap; padding: 0 4px; }
 .meter .bar { width: 44px; height: 4px; border-radius: 2px; background: var(--widget-border); overflow: hidden; }
 .meter .bar i { display: block; height: 100%; background: var(--desc); width: 0; }
@@ -346,6 +364,7 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
   <div id="txn" class="txn"></div>
   <div id="tasks" class="tasks open"></div>
   <div class="inputbox">
+    <div class="winrow" id="winRow"><button class="winchip" id="winChip"></button><button class="winchip target hidden" id="targetChip"></button></div>
     <textarea id="input" rows="1" placeholder="Ask PL/Pilot, / for commands, @ to attach"></textarea>
     <div class="inputbar">
       <button class="mode" id="btnMode" title="Agent: works on the task and makes changes (with your approval). Plan: only investigates and proposes a plan."></button>
@@ -382,6 +401,10 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Context Window</div><div class="s-desc">Context size of the model in tokens (token meter and automatic compaction).</div><input id="ContextWindowTokens" type="number" min="4096"><div id="ctxDetect" class="s-desc"></div></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Server: </span>Detect Context Window</div><label><input type="checkbox" id="DetectContextWindow"><span class="s-desc">Ask the server for the context size of the model (on Test, when the model changes and after its first answer) and set Context Window to it.</span></label></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Compact At</div><div class="s-desc">Summarize older messages when the conversation uses this percentage of the context window (0 = never).</div><input id="CompactAtPercent" type="number" min="0" max="95"></div>
+    <div class="setting check"><div class="s-title"><span class="s-cat">Server: </span>Limits Follow Context Window</div><label><input type="checkbox" id="ScaleWithContextWindow"><span class="s-desc">Larger context windows allow larger tool results, a longer conversation before old results are shortened, and larger object dossiers. The values below are then the minimum.</span></label></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Max Tool Result (characters)</div><div class="s-desc">Longer results of one tool call are cut.</div><input id="MaxToolOutputChars" type="number" min="2000"></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Conversation Budget (characters)</div><div class="s-desc">Above this size older tool results are shortened.</div><input id="ContextBudgetChars" type="number" min="20000"></div>
+    <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Object Dossier (characters)</div><div class="s-desc">Maximum size of one object dossier (explore_objects, @mentions). 0 = automatic from the context window.</div><input id="ExploreMaxChars" type="number" min="0"><div id="limitsInfo" class="s-desc"></div></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Timeout</div><div class="s-desc">Request timeout in seconds.</div><input id="RequestTimeoutSeconds" type="number" min="30"></div>
     <div class="setting"><div class="s-title"><span class="s-cat">Server: </span>Extra Request JSON</div><div class="s-desc">Merged into every request, e.g. {"top_p": 0.95}.</div><textarea id="ExtraBodyJson" rows="2"></textarea></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Server: </span>Use System Proxy</div><label><input type="checkbox" id="UseSystemProxy"><span class="s-desc">Use the Windows proxy settings.</span></label></div>
@@ -509,6 +532,13 @@ const DE = {
   'Ask PL/Pilot, / for commands, @ to attach': 'PL/Pilot fragen – / für Befehle, @ zum Anhängen',
   'Describe the task: the agent investigates (read-only) and proposes a plan': 'Aufgabe beschreiben: Der Agent untersucht (nur lesend) und schlägt einen Plan vor',
   'Stop (Esc)': 'Stoppen (Esc)', 'Send (Enter)': 'Senden (Eingabe)', 'Working…  Esc to stop': 'Arbeitet…  Esc zum Stoppen',
+  'Waiting for the model': 'Warten auf das Modell', 'Thinking': 'Denkt nach', 'Writing': 'Schreibt', 'Waiting for your approval': 'Wartet auf Ihre Zustimmung',
+  'Working': 'Arbeitet', 'tokens': 'Tokens', 'Changes: {0}': 'Änderungen: {0}', 'Objects that also have local files are changed here (your choice in this chat). Click to be asked again.': 'Objekte, die es auch als lokale Dateien gibt, werden hier geändert (Ihre Wahl in diesem Chat). Klicken, um erneut gefragt zu werden.', 'Waiting for your answer': 'Wartet auf Ihre Antwort', 'Other answer…': 'Andere Antwort…', 'Answer: {0}': 'Antwort: {0}', 'step {0}': 'Schritt {0}', 'Esc to stop': 'Esc zum Stoppen',
+  'Worked {0}': 'Gearbeitet: {0}', '1 model turn': '1 Modell-Durchlauf', '{0} model turns': '{0} Modell-Durchläufe', '1 tool call': '1 Tool-Aufruf', '{0} tool calls': '{0} Tool-Aufrufe',
+  'Excluded from the chat: the agent ignores this window and does not read or change it. Click to include it again.':
+    'Vom Chat ausgeschlossen: Der Agent ignoriert dieses Fenster und liest oder ändert es nicht. Klicken, um es wieder einzubeziehen.',
+  'The active window: the agent knows it is open and reads it only when your request is about it. Click to exclude it from the chat.':
+    'Das aktive Fenster: Der Agent weiß, dass es geöffnet ist, und liest es nur, wenn sich Ihre Anfrage darauf bezieht. Klicken, um es vom Chat auszuschließen.',
   // messages
   'You': 'Sie', 'Thinking…': 'Denkt nach…', 'Thought': 'Gedanken', 'Thought for 1 second': 'Nachgedacht: 1 Sekunde', 'Thought for {0} seconds': 'Nachgedacht: {0} Sekunden',
   'Input': 'Eingabe', 'Output': 'Ausgabe', 'Copy': 'Kopieren', 'Insert at cursor': 'Am Cursor einfügen', 'Replace selection in the editor': 'Auswahl im Editor ersetzen',
@@ -564,6 +594,15 @@ const DE = {
   'Context size of the model in tokens (token meter and automatic compaction).': 'Kontextgröße des Modells in Tokens (Token-Anzeige und automatisches Zusammenfassen).',
   'Compact At': 'Zusammenfassen ab', 'Summarize older messages when the conversation uses this percentage of the context window (0 = never).':
     'Ältere Nachrichten zusammenfassen, wenn die Unterhaltung diesen Anteil des Kontextfensters belegt (0 = nie).',
+  'Limits Follow Context Window': 'Grenzen folgen dem Kontextfenster',
+  'Larger context windows allow larger tool results, a longer conversation before old results are shortened, and larger object dossiers. The values below are then the minimum.':
+    'Größere Kontextfenster erlauben größere Tool-Ergebnisse, eine längere Unterhaltung, bevor alte Ergebnisse gekürzt werden, und größere Objekt-Dossiers. Die Werte darunter sind dann das Minimum.',
+  'Max Tool Result (characters)': 'Max. Tool-Ergebnis (Zeichen)', 'Longer results of one tool call are cut.': 'Längere Ergebnisse eines Tool-Aufrufs werden abgeschnitten.',
+  'Conversation Budget (characters)': 'Budget der Unterhaltung (Zeichen)', 'Above this size older tool results are shortened.': 'Oberhalb dieser Größe werden ältere Tool-Ergebnisse gekürzt.',
+  'Object Dossier (characters)': 'Objekt-Dossier (Zeichen)',
+  'Maximum size of one object dossier (explore_objects, @mentions). 0 = automatic from the context window.':
+    'Maximale Größe eines Objekt-Dossiers (explore_objects, @-Erwähnungen). 0 = automatisch aus dem Kontextfenster.',
+  'In effect: tool results {0}, conversation {1}, object dossier {2} characters.': 'Wirksam: Tool-Ergebnisse {0}, Unterhaltung {1}, Objekt-Dossier {2} Zeichen.',
   'Timeout': 'Zeitlimit', 'Request timeout in seconds.': 'Zeitlimit einer Anfrage in Sekunden.',
   'Extra Request JSON': 'Zusätzliches Anfrage-JSON', 'Merged into every request, e.g. {"top_p": 0.95}.': 'Wird in jede Anfrage übernommen, z. B. {"top_p": 0.95}.',
   'Use System Proxy': 'System-Proxy verwenden', 'Use the Windows proxy settings.': 'Die Proxy-Einstellungen von Windows verwenden.',
@@ -772,6 +811,8 @@ const ICON_PATHS = {
   chevdown: '<path d="M4.5 6.5L8 10l3.5-3.5"/>',
   play: '<path d="M5 3.5v9l7-4.5-7-4.5z"/>',
   rewind: '<path d="M2.8 8a5.2 5.2 0 1 0 1.6-3.8"/><path d="M2.6 2.2v3h3"/><path d="M8 5.2V8l2 1.3"/>',
+  eye: '<path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>',
+  eyeoff: '<path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/><path d="M2.5 13.5l11-11"/>',
 };
 function icon(name, cls) {
   return '<svg class="ic' + (cls ? ' ' + cls : '') + '" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">' + (ICON_PATHS[name] || '') + '</svg>';
@@ -843,7 +884,102 @@ function subtaskStep(m) {
   if (!box || !box.classList.contains('substeps')) { box = el('div', 'substeps'); d.after(box); }
   if (box.children.length < 40) box.appendChild(el('div', null, icon('sub') + ' ' + esc(m.text)));
   else if (box.children.length === 40) box.appendChild(el('div', null, '…'));
+  if (run && run.act === 'tool') { run.sub = m.text; showRun(); }
   follow();
+}
+
+// ---------------------------------------------------------------- active window chip
+let winState = null, targetState = null;
+function showWinRow() { $('winRow').className = 'winrow' + (winState || targetState ? ' show' : ''); }
+/** The user's choice where changes of objects with local files go (null: not asked yet in this chat); click to be asked again. */
+function setTarget(text) {
+  targetState = text || null;
+  const chip = $('targetChip');
+  chip.className = 'winchip target' + (targetState ? '' : ' hidden');
+  chip.innerHTML = targetState ? icon('newfile') + '<span class="wl">' + esc(t('Changes: {0}', targetState)) + '</span>' + icon('close') : '';
+  chip.title = t('Objects that also have local files are changed here (your choice in this chat). Click to be asked again.');
+  showWinRow();
+}
+$('targetChip').onclick = () => { setTarget(null); send({ type: 'change_target_reset' }); };
+function setWindow(w) {
+  winState = w || null;
+  const chip = $('winChip');
+  showWinRow();
+  if (!w) { chip.className = 'winchip hidden'; chip.innerHTML = ''; return; }
+  chip.className = 'winchip' + (w.excluded ? ' excluded' : '');
+  chip.innerHTML = icon(w.excluded ? 'eyeoff' : 'eye') + '<span class="wl">' + esc(w.label) + '</span>';
+  chip.title = (w.excluded
+    ? t('Excluded from the chat: the agent ignores this window and does not read or change it. Click to include it again.')
+    : t('The active window: the agent knows it is open and reads it only when your request is about it. Click to exclude it from the chat.')) +
+    '\n' + (w.title || '');
+}
+$('winChip').onclick = () => {
+  if (!winState) return;
+  winState.excluded = !winState.excluded;
+  setWindow(winState);
+  send({ type: 'window_exclude', key: winState.key, excluded: winState.excluded });
+};
+
+// ---------------------------------------------------------------- live status of a running request
+// What the agent is doing right now, for how long, and the totals of the request (like a progress line in a terminal).
+let run = null, runTimer = 0;
+function fmtSecs(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? s + ' s' : Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+/** Duration of one tool call: "0,4 s" / "0.4 s" below 10 seconds, else like fmtSecs. */
+function fmtDuration(ms) {
+  return ms < 10000 ? (ms / 1000).toFixed(1).replace('.', lang === 'de' ? ',' : '.') + ' s' : fmtSecs(ms);
+}
+function runAct(act, detail) {
+  if (!run) return;
+  if (run.act !== act || (detail !== undefined && run.detail !== detail)) {
+    run.act = act; run.actStart = Date.now(); run.sub = '';
+    if (detail !== undefined) run.detail = detail;
+    if (act !== 'think') run.thought = '';
+  }
+  showRun();
+}
+function runText(kind, text) {
+  if (!run) return;
+  run.chars += text.length;
+  if (kind === 'think') {
+    run.thoughtBuf = (run.thoughtBuf + text).slice(-400);
+    const lines = run.thoughtBuf.split('\n').map(l => l.trim()).filter(Boolean);
+    run.thought = lines.length ? lines[lines.length - 1] : '';
+  }
+  if (run.act !== kind) runAct(kind); else if (kind === 'think') showRun();
+}
+function showRun() {
+  if (!run) return;
+  const now = Date.now();
+  const label = run.act === 'model' ? t('Waiting for the model')
+    : run.act === 'think' ? t('Thinking')
+    : run.act === 'write' ? t('Writing')
+    : run.act === 'tool' ? run.detail
+    : run.act === 'approval' ? t('Waiting for your approval')
+    : run.act === 'question' ? t('Waiting for your answer')
+    : t('Working');
+  const tokens = run.chars > 0 ? ' · ~' + fmtTokens(Math.round(run.chars / 3.5)) + ' ' + t('tokens') : '';
+  const detail = run.act === 'think' ? run.thought : run.act === 'tool' ? run.sub : '';
+  $('hint').innerHTML = '<span class="spinner"></span><span class="act">' + esc(label) + ' (' + fmtSecs(now - run.actStart) + ')</span>' +
+    '<span class="thought">' + esc(detail || '') + '</span>' +
+    '<span class="totals">' + esc(t('step {0}', run.steps) + ' · ' + fmtSecs(now - run.start) + tokens + ' · ' + t('Esc to stop')) + '</span>';
+}
+function startRun() {
+  run = { start: Date.now(), act: 'model', actStart: Date.now(), detail: '', sub: '', steps: 0, tools: 0, chars: 0, thought: '', thoughtBuf: '' };
+  clearInterval(runTimer);
+  runTimer = setInterval(showRun, 1000);
+  showRun();
+}
+function endRun() {
+  clearInterval(runTimer);
+  if (!run) return;
+  const r = run; run = null;
+  if (replaying || !messagesEl.querySelector('.msg.user')) return;
+  const parts = [t('Worked {0}', fmtSecs(Date.now() - r.start)), r.steps === 1 ? t('1 model turn') : t('{0} model turns', r.steps)];
+  if (r.tools) parts.push(r.tools === 1 ? t('1 tool call') : t('{0} tool calls', r.tools));
+  append(el('div', 'runsum', icon('history') + '<span>' + esc(parts.join(' · ')) + '</span>'));
 }
 
 // ---------------------------------------------------------------- SQL highlighting
@@ -1091,6 +1227,7 @@ function assistantStart(id) {
   m.appendChild(reason); m.appendChild(content);
   append(m);
   assistants[id] = { el: m, raw: '', reasoning: '', contentEl: content, reasonEl: reason, pending: false, started: Date.now() };
+  if (run) { run.steps++; runAct('model'); }
 }
 function render(a) {
   if (a.raw) a.contentEl.innerHTML = md(a.raw);
@@ -1123,13 +1260,17 @@ function toolStart(m) {
   d.innerHTML = '<summary>' + icon('chev', 'chev') + '<span class="status"><span class="spinner"></span></span><span class="tname">' + esc(String(m.name || '').replace('__', ' › ')) + '</span><span class="tsum">' + esc(m.summary || '') + '</span></summary>' +
     '<div class="tbody"><div class="label">' + t('Input') + '</div><pre>' + esc(m.args || '') + '</pre><div class="result"></div></div>';
   tools[m.callId] = d;
+  d.__start = Date.now();
   if (needHead) { const b = responseBlock('assistant'); append(b); }
   append(d);
+  if (run) { run.tools++; runAct('tool', String(m.name || '').replace('__', ' › ') + (m.summary ? ' ' + m.summary : '')); }
 }
 function toolEnd(m) {
   const d = tools[m.callId]; if (!d) return;
   d.classList.remove('running'); d.classList.add(m.ok ? 'ok' : 'err');
   d.querySelector('.status').innerHTML = icon(m.ok ? 'check' : 'error');
+  if (!replaying && d.__start) d.querySelector('summary').appendChild(el('span', 'tdur', esc(fmtDuration(Date.now() - d.__start))));
+  if (run) runAct('between');
   d.querySelector('.result').innerHTML = '<div class="label">' + t('Output') + '</div><pre>' + esc(m.result || '') + '</pre>';
   const meta = m.meta || {};
   const buttons = [];
@@ -1182,6 +1323,7 @@ function approval(m) {
   // Enter in the feedback field rejects with that feedback; it never approves
   fb.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (fb.value.trim()) card.querySelector('button[data-a="no"]').click(); } });
   approvals[m.id] = card;
+  if (run) { run.approvalFor = run.act === 'tool' ? run.detail : ''; runAct('approval'); }
   const toolEl = tools[m.callId];
   if (toolEl) toolEl.after(card); else append(card);
   if (!replaying) {
@@ -1195,9 +1337,40 @@ function approval(m) {
 function finishApproval(id, text, ok) {
   const card = approvals[id]; if (!card || card.classList.contains('done')) return;
   card.classList.add('done');
+  if (run && run.act === 'approval') runAct(run.approvalFor ? 'tool' : 'between', run.approvalFor || undefined);
   const actions = card.querySelector('.aactions'); if (actions) actions.remove();
   card.appendChild(el('div', 'verdict ' + (ok ? 'ok' : 'bad'), icon(ok ? 'check' : 'error') + esc(text.replace(/^Approved/, 'Allowed'))));
   const pre = card.querySelector('pre'); if (pre) pre.style.maxHeight = '120px';
+  follow();
+}
+// ---------------------------------------------------------------- questions of the agent (ask_user)
+const questions = {};
+function question(m) {
+  const card = el('div', 'approval question');
+  card.innerHTML = '<div class="ahead">' + icon('info') + '<span>' + esc(m.question || '') + '</span></div>' +
+    '<div class="aactions">' + (m.options || []).map((o, i) => '<button data-i="' + i + '">' + esc(o) + '</button>').join('') +
+    '<input placeholder="' + esc(t('Other answer…')) + '"></div>';
+  const input = card.querySelector('input');
+  const armedAt = Date.now() + 700; // a key press meant for the input box must not answer
+  const answer = text => {
+    if (Date.now() < armedAt || !String(text).trim()) return;
+    send({ type: 'question_reply', id: m.id, answer: text });
+    finishQuestion(m.id, text, false);
+  };
+  card.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => answer(m.options[+b.dataset.i]));
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); answer(input.value); } });
+  questions[m.id] = card;
+  const toolEl = tools[m.callId];
+  if (toolEl) toolEl.after(card); else append(card);
+  if (run) runAct('question');
+  if (!replaying) { stick = true; toBottom(); }
+}
+function finishQuestion(id, text, cancelled) {
+  const card = questions[id]; if (!card || card.classList.contains('done')) return;
+  card.classList.add('done');
+  const actions = card.querySelector('.aactions'); if (actions) actions.remove();
+  card.appendChild(el('div', 'verdict ' + (cancelled ? 'bad' : 'ok'), icon(cancelled ? 'error' : 'check') + esc(cancelled ? t('Cancelled') : t('Answer: {0}', text))));
+  if (run && run.act === 'question') runAct('tool', run.detail);
   follow();
 }
 function notice(text) { append(el('div', 'notice', icon(/continuing automatically|automatisch fortgesetzt/i.test(text) ? 'retry' : 'info') + '<span>' + esc(text) + '</span>')); }
@@ -1248,7 +1421,7 @@ function setBusy(b) {
   btn.className = b ? 'stop' : (inputEl.value.trim() ? 'ready' : '');
   const hint = $('hint');
   hint.className = 'hint' + (b ? ' busy' : '');
-  hint.innerHTML = b ? '<span class="spinner"></span><span>' + t('Working…  Esc to stop') + '</span>' : '';
+  if (b && !replaying) startRun(); else { endRun(); hint.innerHTML = ''; }
   if (b) removeEndbar(); else { showEndbar(); inputEl.focus(); }
   renderTxn();
 }
@@ -1485,7 +1658,8 @@ function replay(events) {
 }
 
 // ---------------------------------------------------------------- settings editor
-const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'DetectContextWindow', 'CompactAtPercent', 'RequestTimeoutSeconds', 'ExtraBodyJson',
+const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'ContextWindowTokens', 'DetectContextWindow', 'CompactAtPercent',
+  'ScaleWithContextWindow', 'MaxToolOutputChars', 'ContextBudgetChars', 'ExploreMaxChars', 'RequestTimeoutSeconds', 'ExtraBodyJson',
   'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'McpConfigPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
   'MaxQueryRows', 'ConfirmSlowQuerySeconds', 'CompilerWarnings', 'MentionSuggestions', 'ProtectedConnections', 'BackupBeforeChanges',
   'SaveChatHistory', 'ChatHistoryContent', 'ChatRetentionDays', 'BackupRetentionDays', 'LogRetentionDays',
@@ -1499,9 +1673,23 @@ function openSettings(cfg) {
   renderMcpList(cfg.McpServers || []);
   if (!$('rulesInfo').textContent) $('rulesInfo').textContent = t('Checking rule files…');
   updatePromptState();
+  showLimits();
   $('settings').classList.add('open');
   $('BaseUrl').focus();
 }
+
+// the size limits in effect (same formulas as AgentConfig.ToolOutputLimit / ContextBudgetLimit / ExploreOutputLimit)
+function showLimits() {
+  const v = id => Math.max(0, +$(id).value || 0), scale = $('ScaleWithContextWindow').checked;
+  const share = s => Math.floor(v('ContextWindowTokens') * 2.8 * s);
+  const tool = Math.max(2000, scale ? Math.max(v('MaxToolOutputChars'), Math.min(200000, share(0.05))) : v('MaxToolOutputChars'));
+  const conv = Math.max(20000, scale ? Math.max(v('ContextBudgetChars'), share(0.65)) : v('ContextBudgetChars'));
+  const dossier = v('ExploreMaxChars') > 0 ? Math.max(2000, v('ExploreMaxChars')) : Math.max(tool, scale ? Math.min(400000, share(0.20)) : 0);
+  const num = n => Number(n).toLocaleString(lang === 'de' ? 'de-DE' : 'en-US');
+  $('limitsInfo').textContent = t('In effect: tool results {0}, conversation {1}, object dossier {2} characters.', num(tool), num(conv), num(dossier));
+}
+['ContextWindowTokens', 'MaxToolOutputChars', 'ContextBudgetChars', 'ExploreMaxChars'].forEach(id => $(id).addEventListener('input', showLimits));
+$('ScaleWithContextWindow').addEventListener('change', showLimits);
 
 // ---------------------------------------------------------------- system prompt / company rules editor
 let defaultPrompt = '', rulesTemplate = '', rulesPath = '', editorMode = null;
@@ -1743,7 +1931,7 @@ function showContext(c) {
   const num = n => Number(n).toLocaleString(lang === 'de' ? 'de-DE' : 'en-US');
   let s = c.tokens ? t('Server context window: {0} tokens ({1}).', num(c.tokens), c.source) : t('The model supports up to {0} tokens ({1}).', num(c.maximum), c.source);
   if (c.note) s += ' ' + c.note;
-  if (c.setting && $('DetectContextWindow').checked) { $('ContextWindowTokens').value = c.setting; s += ' ' + t('Context Window set to {0}: click Save to keep it.', num(c.setting)); }
+  if (c.setting && $('DetectContextWindow').checked) { $('ContextWindowTokens').value = c.setting; showLimits(); s += ' ' + t('Context Window set to {0}: click Save to keep it.', num(c.setting)); }
   box.textContent = s;
 }
 $('btnTest').onclick = () => { $('testResult').textContent = t('Testing…'); $('testResult').style.color = ''; send({ type: 'test_connection', config: readSettings() }); };
@@ -1778,7 +1966,7 @@ function onHost(m) {
       if (m.needsSetup) { openSettings(m.config); $('testResult').textContent = t('Please configure your LLM server first.'); }
       break;
     case 'theme': document.body.classList.toggle('dark', !!m.dark); break;
-    case 'context': $('ctx').textContent = m.text; $('ctx').title = m.text; break;
+    case 'context': $('ctx').textContent = m.text; $('ctx').title = m.text; if ('window' in m) setWindow(m.window); if ('target' in m) setTarget(m.target); break;
     case 'guard': setGuard(m); break;
     case 'usage': setUsage(m); break;
     case 'prefill':
@@ -1795,8 +1983,8 @@ function onHost(m) {
     case 'subtask_step': subtaskStep(m); break;
     case 'attachments': addAttachments(m.items || []); break;
     case 'assistant_start': assistantStart(m.id); break;
-    case 'delta': { const a = assistants[m.id]; if (a) { a.raw += m.text; scheduleRender(a); } break; }
-    case 'reasoning': { const a = assistants[m.id]; if (a) { a.reasoning += m.text; scheduleRender(a); } break; }
+    case 'delta': { const a = assistants[m.id]; if (a) { a.raw += m.text; scheduleRender(a); } runText('write', m.text || ''); break; }
+    case 'reasoning': { const a = assistants[m.id]; if (a) { a.reasoning += m.text; scheduleRender(a); } runText('think', m.text || ''); break; }
     case 'assistant_end': assistantEnd(m.id); break;
     case 'assistant_full': {
       assistantStart(m.id);
@@ -1809,6 +1997,9 @@ function onHost(m) {
     case 'approval': approval(m); break;
     case 'approval_done': finishApproval(m.id, m.text, m.ok); break;
     case 'approval_cancel': finishApproval(m.id, 'Cancelled', false); break;
+    case 'question': question(m); break;
+    case 'question_done': finishQuestion(m.id, m.text, !!m.cancelled); break;
+    case 'question_cancel': finishQuestion(m.id, '', true); break;
     case 'undo_done': actionDone('[data-undo="' + m.id + '"]', m, 'Reverted', true); break;
     case 'restore_done': actionDone('[data-restore="' + m.id + '"]', m, 'Restored', false); break;
     case 'applied': applied(m); break;

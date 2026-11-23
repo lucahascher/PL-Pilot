@@ -105,4 +105,46 @@ namespace PlsqlDevAgent.Agent.Tools
             return "Report of the helper agent:\n" + report;
         }
     }
+
+    /// <summary>A question to the user with answer buttons; the answer comes back as the result of this call.</summary>
+    internal sealed class AskUserTool : AgentTool
+    {
+        public const string ToolName = "ask_user";
+        public override string Name => ToolName;
+        public override string Description =>
+            "Asks the user a question that only the user can decide, with 2 to 5 answer options shown as buttons (the user " +
+            "can also type another answer). Waits for the answer and returns it, so you can continue in the same turn. " +
+            "Use it for real decisions – e.g. whether a change goes to the database, the local files or both – not to " +
+            "confirm single actions (changes are shown for approval anyway) and not for things you can find out yourself.";
+        public override JObject Parameters => new JObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JObject
+            {
+                ["question"] = new JObject { ["type"] = "string", ["description"] = "The question, short and in the user's language." },
+                ["options"] = new JObject
+                {
+                    ["type"] = "array",
+                    ["items"] = new JObject { ["type"] = "string" },
+                    ["description"] = "2 to 5 short answers (a few words each), in the user's language.",
+                },
+            },
+            ["required"] = new JArray("question", "options"),
+        };
+        public override string Summarize(JObject args) => Str(args, "question", "");
+
+        public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
+        {
+            if (ctx.AskUser == null) return "Not available: nobody can answer here (helper agents cannot ask the user). Decide yourself or report the open question.";
+            var question = ReqStr(args, "question").Trim();
+            var options = (args?["options"] is JArray a ? a.Select(x => x.Type == JTokenType.String ? (string)x : x.ToString())
+                          : (Str(args, "options") ?? "").Split(new[] { '|', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                .Select(o => (o ?? "").Trim()).Where(o => o.Length > 0).Distinct().Take(5).ToArray();
+            var answer = await ctx.AskUser(question, options).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(answer)) return "The user gave no answer. Ask again in your reply or decide carefully yourself.";
+            return options.Contains(answer)
+                ? $"The user chose: {answer}"
+                : $"The user answered: {answer}";
+        }
+    }
 }

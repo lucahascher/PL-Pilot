@@ -20,7 +20,9 @@ namespace PlsqlDevAgent.Agent.Tools
             var schema = c.Connected ? ctx.CurrentSchema : "";
             return Task.FromResult(
                 $"Connection: {c.ConnectionLabel}" + (c.Connected ? $" (current schema {schema})" : "") + "\n" +
-                $"Active window: {c.WindowLabel}");
+                (ctx.ExcludedWindowMessage(c) != null
+                    ? "Active window: excluded by the user (not part of the request; do not read or change it)"
+                    : $"Active window: {c.WindowLabel}"));
         }
     }
 
@@ -39,6 +41,7 @@ namespace PlsqlDevAgent.Agent.Tools
         public override Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
             var c = ctx.Ide.GetContext();
+            if (ctx.ExcludedWindowMessage(c) is string excluded) return Task.FromResult(excluded);
             var text = ctx.Ide.GetEditorText();
             if (string.IsNullOrEmpty(text)) return Task.FromResult($"[{c.WindowLabel}]\n(the editor is empty)");
             int start = Int(args, "start_line", 0), end = Int(args, "end_line", 0);
@@ -58,6 +61,7 @@ namespace PlsqlDevAgent.Agent.Tools
 
         public override Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
+            if (ctx.ExcludedWindowMessage(ctx.Ide.GetContext()) is string excluded) return Task.FromResult(excluded);
             var sel = ctx.Ide.GetSelectedText();
             return Task.FromResult(string.IsNullOrEmpty(sel) ? "(nothing selected)" : sel.Replace("\r\n", "\n"));
         }
@@ -79,9 +83,24 @@ namespace PlsqlDevAgent.Agent.Tools
 
         public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
+            if (ctx.ExcludedWindowMessage(ctx.Ide.GetContext()) is string excluded) return excluded;
             var before = ctx.Ide.GetEditorText();
             var after = TextEdit.Apply(before, ReqStr(args, "old_string"), ReqStr(args, "new_string"), Bool(args, "replace_all", false));
-            return await ApplyToEditor(ctx, before, after, "Edit editor text");
+            var (proceed, localNote) = await LocalCheck(ctx);
+            if (!proceed) return localNote;
+            var result = await ApplyToEditor(ctx, before, after, "Edit editor text");
+            return localNote == null ? result : result.TrimEnd() + "\n\n" + localNote;
+        }
+
+        /// <summary>
+        /// A window showing a database object (not a file) is changed to be compiled into the database: for objects that
+        /// also have local source files the user decides once per chat where changes go (see <see cref="LocalChanges"/>).
+        /// </summary>
+        internal static Task<(bool Proceed, string Message)> LocalCheck(ToolContext ctx)
+        {
+            var c = ctx.Ide.GetContext();
+            if (string.IsNullOrEmpty(c.ObjectName) || !string.IsNullOrEmpty(c.FileName)) return Task.FromResult<(bool, string)>((true, null));
+            return LocalChanges.CheckAsync(ctx, new[] { ((c.ObjectType ?? "").ToUpperInvariant(), (c.ObjectOwner ?? "").ToUpperInvariant(), c.ObjectName.ToUpperInvariant()) });
         }
 
         internal static async Task<string> ApplyToEditor(ToolContext ctx, string before, string after, string title)
@@ -117,12 +136,16 @@ namespace PlsqlDevAgent.Agent.Tools
         public override JObject Parameters => Schema(Req("text", "string", "The complete new editor content."));
         public override bool Mutating => true;
 
-        public override Task<string> ExecuteAsync(JObject args, ToolContext ctx)
+        public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
+            if (ctx.ExcludedWindowMessage(ctx.Ide.GetContext()) is string excluded) return excluded;
             var before = ctx.Ide.GetEditorText();
             var after = ReqStr(args, "text");
             if (before.Contains("\r\n")) after = after.Replace("\r\n", "\n").Replace("\n", "\r\n");
-            return EditEditorTool.ApplyToEditor(ctx, before, after, "Replace editor text");
+            var (proceed, localNote) = await EditEditorTool.LocalCheck(ctx);
+            if (!proceed) return localNote;
+            var result = await EditEditorTool.ApplyToEditor(ctx, before, after, "Replace editor text");
+            return localNote == null ? result : result.TrimEnd() + "\n\n" + localNote;
         }
     }
 

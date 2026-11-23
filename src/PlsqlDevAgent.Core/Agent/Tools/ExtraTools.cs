@@ -60,7 +60,7 @@ namespace PlsqlDevAgent.Agent.Tools
             if (!res.Ok) return "EXPLAIN PLAN failed: " + res.ErrorMessage;
             var plan = ctx.Ide.Query($"select plan_table_output from table(dbms_xplan.display('PLAN_TABLE', '{id}', '{format}'))", 1000);
             var text = string.Join("\n", plan.Rows.Select(r => r[0]));
-            return Db.Truncate(text.Length == 0 ? "(no plan returned)" : text, ctx.Config.MaxToolOutputChars);
+            return Db.Truncate(text.Length == 0 ? "(no plan returned)" : text, ctx.Config.ToolOutputLimit);
         }
     }
 
@@ -76,6 +76,7 @@ namespace PlsqlDevAgent.Agent.Tools
         public override Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
             var c = ctx.Ide.GetContext();
+            if (ctx.ExcludedWindowMessage(c) is string excluded) return Task.FromResult(excluded);
             if (c.WindowType != IdeWindowType.Sql && c.WindowType != IdeWindowType.Test)
                 return Task.FromResult($"The active window is not a SQL or Test window ({c.WindowLabel}).");
             var grid = ctx.Ide.GetResultGrid(Math.Max(1, Math.Min(Int(args, "max_rows", 50), 500)));
@@ -85,7 +86,7 @@ namespace PlsqlDevAgent.Agent.Tools
             if (grid.Columns.Count == 0 && grid.Rows.Count == 0)
                 sb.Append("The result grid is empty (the query has not been executed or returned no rows).");
             else
-                sb.Append("Result grid:\n").Append(FormatResult(grid, ctx.Config.MaxToolOutputChars));
+                sb.Append("Result grid:\n").Append(FormatResult(grid, ctx.Config.ToolOutputLimit));
             return Task.FromResult(sb.ToString());
         }
     }
