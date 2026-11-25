@@ -69,8 +69,8 @@ namespace PlsqlDevAgent.Util
             ["The model kept repeating the same text and was stopped. Rephrase the request, split it into smaller steps or use a larger model."] =
                 "Das Modell hat immer wieder denselben Text wiederholt und wurde gestoppt. Formulieren Sie die Anfrage um, teilen Sie sie in kleinere Schritte oder verwenden Sie ein größeres Modell.",
             // context window detection
-            ["Context window set to {0:N0} tokens (was {1:N0}): {2} reports this size for {3}."] =
-                "Kontextfenster auf {0:N0} Tokens gesetzt (vorher {1:N0}): {2} meldet diese Größe für {3}.",
+            ["Context window for {0} set to {1:N0} tokens (was {2:N0}). Source: {3}."] =
+                "Kontextfenster für {0} auf {1:N0} Tokens gesetzt (vorher {2:N0}). Quelle: {3}.",
             ["LM Studio (model loaded)"] = "LM Studio (Modell geladen)",
             ["model list of the server"] = "Modellliste des Servers",
             ["model list of the server (maximum)"] = "Modellliste des Servers (Maximum)",

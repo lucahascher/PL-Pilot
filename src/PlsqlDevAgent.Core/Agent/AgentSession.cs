@@ -900,7 +900,8 @@ namespace PlsqlDevAgent.Agent
                     cfg.ContextWindowTokens = value.Value;
                     if (!cfg.SessionOnly) cfg.Save();
                     Log.Info($"Context window of {cfg.Model}: {before} -> {value} tokens ({info.Source})");
-                    _ui.Notice(L.T("Context window set to {0:N0} tokens (was {1:N0}): {2} reports this size for {3}.", value.Value, before, L.T(info.Source), cfg.Model));
+                    // the model first, the server only as the source: "Ollama, model loaded reports …" read as if Ollama were the model
+                    _ui.Notice(L.T("Context window for {0} set to {1:N0} tokens (was {2:N0}). Source: {3}.", cfg.Model, value.Value, before, L.T(info.Source)));
                     _ui.ContextUsage(EstimateTokens(), cfg.ContextWindowTokens, true);
                 }
                 catch (Exception ex) { Log.Warn("Context window check failed: " + ex.Message); }

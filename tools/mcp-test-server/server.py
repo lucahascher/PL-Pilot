@@ -7,8 +7,12 @@ implementation.
     docker run -d --name plpilot-mcp-test -p 8801:8000 -e MCP_TOKEN=test-token plpilot-mcp-test
     # the old HTTP+SSE transport:              URL http://localhost:8802/sse
     docker run -d --name plpilot-mcp-test-sse -p 8802:8000 -e MCP_TRANSPORT=sse plpilot-mcp-test
+    # more tickets and commits from a JSON file (see load_extra_data), e.g. for a demo:
+    docker run -d --name plpilot-mcp-test -p 8801:8000 -e MCP_TOKEN=test-token -e MCP_DATA=/data/tickets.json \
+        -v /path/to/folder:/data:ro plpilot-mcp-test
 """
 import asyncio
+import json
 import os
 
 import uvicorn
@@ -18,7 +22,8 @@ from mcp.types import ToolAnnotations
 mcp = FastMCP(
     "tickets-test",
     instructions=(
-        "Test ticket system. Ticket keys look like PLS-123. get_ticket returns the ticket with its linked commits; "
+        "Test ticket system. Ticket keys are a project prefix and a number, e.g. PLS-123. get_ticket returns the "
+        "ticket with its linked commits; "
         "get_commit shows the change of a commit; search_commits searches the version control history."
     ),
 )
@@ -64,6 +69,23 @@ COMMITS = {
         "diff": "--- a/db/emp.sql\n+++ b/db/emp.sql\n+alter table emp add (created_by varchar2(30), created_at date);\n",
     },
 }
+
+
+def load_extra_data(path):
+    """Adds tickets and commits from a JSON file (environment variable MCP_DATA), e.g. for a demo:
+    {"tickets": {"KEY-1": {"title": "…", "status": "open", "reporter": "…", "description": "…", "commits": ["abc1234"]}},
+     "commits": {"abc1234": {"date": "2026-11-18", "author": "…", "message": "…", "diff": "…"}}}"""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    for key, ticket in (data.get("tickets") or {}).items():
+        ticket.setdefault("commits", [])
+        ticket.setdefault("comments", [])
+        TICKETS[key.strip().upper()] = ticket
+    COMMITS.update(data.get("commits") or {})
+
+
+if os.environ.get("MCP_DATA"):
+    load_extra_data(os.environ["MCP_DATA"])
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get ticket", readOnlyHint=True))
