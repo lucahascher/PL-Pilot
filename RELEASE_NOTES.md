@@ -2,103 +2,135 @@
 
 ## 0.6.0 – 2026-11-25
 
-Fixes from daily use with large packages and helper agents.
+This release fixes what got in the way in daily work: large packages that could not be changed, a frozen PL/SQL
+Developer while helper agents ran, and an agent that lost track when you switched windows. It also adds a switch your
+DBA will like: no parallel execution on the database.
 
 ### Highlights
 
-- **Packages of any size can be changed:** the model sends only the changed lines (`edit_object_source`) or
-  compiles straight from the editor window, instead of writing a whole package into its answer.
-- **Switch windows while the agent works:** it stays on the window of your request and changes it in the background.
-- **No more frozen IDE without a separate session:** PL/SQL Developer handles input between the agent's statements,
-  PL/Pilot tells you once why it is slow, and stalls are logged.
-- **No parallel execution:** a new setting (on by default) keeps the agent's SQL serial – a DBA request for
-  development databases with few CPU cores.
-- **Smooth progress spinner.**
+- **Packages of any size:** the agent changes a 4,000-line package by sending only the changed lines, and compiles
+  code straight from the editor window – it no longer has to write whole packages into its answer.
+- **Keep working while the agent works:** switch to another window – the agent stays with the window of your request
+  and changes it in the background; your window stays in front.
+- **No more frozen IDE:** PL/SQL Developer keeps reacting while helper agents run, even when the agent shares your
+  database session.
+- **No parallel execution** (new setting, on by default): the agent's SQL runs serially and takes no parallel
+  execution servers from the database.
+- **Shorter approval cards:** a compile of an existing unit shows only what changes, not the complete code.
 
 ---
 
+### New: changing large packages
+
+Until now, changing a 4,000-line package failed. To compile it, the model had to write the complete package into a
+single tool call – far more than its output limit (*Max tokens*, 8,192 by default). The call was cut off and not
+executed, and the complete code could end up in the chat.
+
+- **`edit_object_source`** (new tool): changes a package, package body, procedure, function, trigger, type or type
+  body in the database by exact replacements – the model sends only the changed lines. PL/Pilot reads the current
+  source from the database, applies the changes, shows the diff for your approval and compiles the result like
+  before: previous version backed up, compiler settings kept, errors and warnings reported. Without an object type a
+  package or type is changed where the edits match (specification or body). Changing one line in a 4,002-line
+  package body takes about half a second including compilation.
+- **`compile_plsql`** now takes the code in one of three ways: from the editor window of the request
+  (`from_editor`, e.g. after `edit_editor`), from a file of the project folder (`file`), or as text (`source`, for new
+  or short units).
+- **Approval cards show a diff:** compiling a unit that already exists shows the changes against the database version
+  (*Open Diff* shows both versions in PL/SQL Developer). The card used to show the complete code, so a large package
+  filled the chat. New units are still shown in full.
+- **Cut-off tool calls** are no longer executed. The chat shows only their beginning together with a notice, and the
+  model is told to use the tools above. If the model server returns a cut-off call as plain text (DeepSeek's template
+  tokens such as `<｜tool▁calls▁begin｜>`), that text is hidden instead of appearing as the answer.
+
+### New: the agent keeps its editor window
+
+The agent now works on the window that was active when you sent your request – or on the window it opened itself
+(`open_object`, `open_new_window`, `open_file_in_ide`). If you switch to another window while the agent is still
+planning or editing, it carries on with its window in the background and your window stays in front. The window is
+found again by its editor and, if needed, by the object or file it shows. If you close it, the agent says so instead
+of writing into another window. In its answers the agent names the window by its object or file ("the package body
+EMP_API"), not as "the active window".
+
+This applies to reading and editing the editor text, the selection, the result grid and `compile_plsql` from the
+editor.
+
 ### New: setting "No parallel execution"
 
-On a development database with 8 cores, a parallel query of the agent takes CPU from everybody. With the setting
-(*Settings → Safety → No Parallel Execution*, on by default):
+On a shared development database with few CPU cores, one parallel query takes CPU from everybody. With
+*Settings → Safety → No Parallel Execution* (on by default):
 
-- the agent's own session gets `ALTER SESSION DISABLE PARALLEL QUERY / DML / DDL` (before its next statement; turned
-  off again, Oracle's defaults are restored);
-- every query and DML statement of the agent gets a statement-level `NO_PARALLEL` hint, and `PARALLEL`,
-  `PARALLEL_INDEX` and `ENABLE_PARALLEL_DML` hints are removed – also in subqueries, but not inside string literals. For
-  `WITH` queries the hint goes to the main query. This also covers the SQL that `measure_sql` runs inside PL/SQL,
-  `explain_plan` and the runtime estimate before a query;
-- `ALTER SESSION ENABLE/FORCE PARALLEL` is refused, and the model is told that parallel execution is off.
+- the agent's own database session runs `ALTER SESSION DISABLE PARALLEL QUERY / DML / DDL`; switching the setting off
+  restores Oracle's defaults;
+- every query and DML statement of the agent gets a `NO_PARALLEL` hint, and `PARALLEL` hints the model writes are
+  removed (also in subqueries, never inside string literals) – including the statements `measure_sql`,
+  `explain_plan` and the runtime estimate run;
+- `ALTER SESSION ENABLE/FORCE PARALLEL` is refused, and the model knows that parallel execution is off.
 
-If the agent shares your main session (*Separate session* off), PL/Pilot does not alter your session; the hints still
-apply. Verified in PL/SQL Developer against Oracle 23ai: the statements Oracle received (from `V$SQL`) all carry
-`NO_PARALLEL` and none of the model's `PARALLEL` hints. Oracle Free has no parallel servers (and keeps parallel query
-disabled in every session), so actual parallel execution could not be observed there.
-
-### New: changing large packages (`edit_object_source`, `compile_plsql` from the editor or a file)
-
-A 4,000-line package used to fail: to compile it, the model had to write the whole package into one tool call, which
-is far more than its output limit (*Max tokens*, 8,192 by default). The cut-off call was not executed, and the text
-of it could end up in the chat.
-
-- **`edit_object_source`** changes a stored package, package body, procedure, function, trigger, type or type
-  body by exact replacements – only the changed lines. PL/Pilot reads the source from the database, applies them,
-  shows the diff for approval (also in PL/SQL Developer's difference viewer) and compiles it like `compile_plsql`
-  (backup, compiler settings kept, errors and warnings). Without an object type, a package or type is changed where
-  the edits match: specification or body. Wrapped units are refused. Measured: one line in a 4,002-line body,
-  0.5 s including compilation.
-- **`compile_plsql`** takes the code in one of three ways: `from_editor` (the text of the request's editor window,
-  e.g. after `edit_editor`), `file` (a file of the project folder) or `source` (new or short units).
-- **The approval of a compile shows a diff** against the version in the database when the unit already exists
-  (*Open Diff* shows both versions in PL/SQL Developer). It used to show the complete code – for a 4,000-line package
-  the whole package appeared in the chat and stayed there. New units are still shown in full.
-- **Cut-off tool calls:** when the output limit cuts off a tool call, it is not executed, the chat shows only the
-  beginning of its arguments with a notice, and the model is told to use the tools above. When the server returns
-  a cut-off call as plain text (DeepSeek's template tokens `<｜tool▁calls▁begin｜>`, `<tool_call>`), that text is
-  hidden instead of being shown as the answer.
-
-### New: the request keeps its editor window
-
-The editor tools (`get_editor_text`, `edit_editor`, `set_editor_text`, `get_selected_text`, `get_result_grid`,
-`compile_plsql from_editor`) work on the window that was active when you sent the request – or the one the agent
-opened with `open_object`, `open_new_window` or `open_file_in_ide`. If you switch to another window while the agent
-plans or edits, it carries on with its window in the background (PL/SQL Developer's `IDE_SelectWindow`) and your
-window stays in front. It is found by its editor control, or by the object or file it shows; if it was closed, the
-agent says so instead of writing into another window. `get_ide_context` names both windows, and the model is told to
-refer to the window by its object or file.
+If the agent shares your own session (*Separate session* off), PL/Pilot does not change your session; the hints
+still apply.
 
 ### Fixed: PL/SQL Developer froze while helper agents ran
 
-Measured on the local test database: with the plug-in's own session, helper agents do not slow down the IDE at all
-(a real two-helper run: longest main-thread wait 1 ms; 533 tool runs in three parallel loops: 1 ms). The freeze happens
-when the agent has **no session of its own** (setting *Separate session* off, or PL/SQL Developer's session mode
-*Single session*): then every statement runs on the IDE's main thread, and helpers send them almost without pause.
+The freeze happens when the agent has **no database session of its own** – the PL/Pilot setting *Separate session*
+is off, or PL/SQL Developer runs in *Single session* mode. Then every statement of the agent runs on PL/SQL
+Developer's main thread, and helper agents send statements almost without pause. PL/SQL Developer handled the
+agent's queued work before keyboard, mouse and screen updates, so it could not react at all.
 
-- Between statements on the main thread PL/SQL Developer now handles keyboard, mouse and painting first (the
-  plug-in's queued work used to come before them, so the IDE never got to react). Measured with the main session
-  and three helper-like tool loops for 12 s: before, a 50 ms timer on the IDE's main thread fired twice and the IDE
-  could not react for **12 s**; now it fired 135 times, longest pause **0.2 s**. A single long statement still
-  blocks the IDE for its duration – that needs the separate session.
+- PL/SQL Developer now handles input and screen updates between the agent's statements. Measured with three
+  helper-like loops for 12 seconds: before, the IDE could not react for the whole 12 seconds; now the longest pause was
+  0.2 seconds.
 - A notice in the chat says once that the agent has no session of its own, and how to change that.
-- While the agent works, stalls of the main thread longer than 2 s are logged with what caused them (plug-in work,
-  e.g. the SQL statement, or PL/SQL Developer itself); main-thread work longer than 1 s is logged too.
+- While the agent works, `agent.log` records every time PL/SQL Developer does not respond for more than 2 seconds,
+  together with what kept it busy.
+
+With its own session (the default), the agent's SQL runs in the background and helper agents do not slow down
+PL/SQL Developer at all (measured: longest wait 1 ms).
 
 ### Fixed: the progress spinner kept restarting
 
-The status line under the input was rebuilt with every update (each streamed chunk, every second), which restarted
-the spinner's animation. Only the texts change now, so it turns smoothly for the whole request.
+The spinner under the input jumped back to its start with every update. It now turns smoothly for the whole request.
 
-### Tests
+### Upgrade notes
 
-- In-IDE self test modes `FREEZE-MEASURE` (main-thread latency and input responsiveness while statements, parallel
-  tool loops and real helper agents run; `PLSQLDEVAGENT_AUTOTEST_SHARED=1` with the main session,
-  `PLSQLDEVAGENT_MAINTHREAD_YIELD_MS` for comparisons), `WINDOW-ONLY` (read and write a window that is not in front,
-  tools bound to the request's window, a closed window, `edit_object_source` on a 4,002-line package body and its
-  specification), `BIGUNIT-LLM` (the real model changes a 4,002-line body, and edits its window while another
-  window is opened in front) and `PARALLEL-ONLY` (session status, the statements Oracle received, the refusal).
-- Harness: `HARNESS_ONLY=<check group>` runs a single group of checks.
-- Harness: switching windows during a request, `compile_plsql from_editor`, `edit_object_source`, cut-off tool calls
-  (as a broken call and as template text).
+- **Version 0.6.0.** Install as before; settings and chats are kept.
+- **No parallel execution is on after the update.** Switch it off under *Settings → Safety* if you want the agent's
+  queries to use parallel execution.
+- **If PL/SQL Developer becomes unresponsive while the agent works,** turn on *Separate session* (*Settings → Safety*)
+  and set PL/SQL Developer's session mode to *Multi session* or *Dual session* (*Preferences → Oracle →
+  Connection*). PL/Pilot shows a notice in the chat when this applies.
+- You do not need to raise *Max tokens* for large packages.
+
+### Known limitations
+
+- Without a session of its own the agent's SQL still runs on PL/SQL Developer's main thread: a single long statement
+  blocks the IDE for as long as it runs. Only the separate session avoids that.
+- `edit_object_source` needs the changed lines exactly as stored in the database; the model reads them with
+  `get_object_source` first. Wrapped (encrypted) units cannot be changed.
+- Unsaved SQL windows without a file are told apart only by their editor; the agent describes all of them as
+  "SQL window".
+- In one of three test runs with a real model, the agent's program window came to the front after an edit. A second
+  window of the same package was open from an earlier step. This did not happen again, and the direct tests always
+  pass.
+- Parallel execution could only be checked on Oracle 23ai Free, which has no parallel servers: the tests confirm
+  the statements Oracle received (all with `NO_PARALLEL`), not prevented parallel execution itself. On your database:
+  `v$session.pq_status` of the agent's session shows `DISABLED`.
+
+### Tested
+
+- Harness (simulated IDE, scripted model): 239 checks passed, including the new ones for switching windows during a
+  request, compiling from the editor, `edit_object_source`, cut-off tool calls and "No parallel execution".
+- In PL/SQL Developer 17 against Oracle 23ai:
+  - SQL-ONLY: 48 checks passed.
+  - ANALYSIS-ONLY: 80 checks passed.
+  - Editor windows and large units: 15 checks passed (reading and writing a window in the background, including a
+    4,002-line package body).
+  - No parallel execution: 8 checks passed.
+  - Freeze measurement: the numbers above.
+- Real model (gemma4:12b via Ollama): it changed one procedure of a 4,002-line package body without sending the
+  package, with a 4-line diff in the approval card, and edited its program window while another window was in front.
+  All three checks passed in the final run.
+- New self-test modes for developers: `FREEZE-MEASURE`, `WINDOW-ONLY`, `BIGUNIT-LLM`, `PARALLEL-ONLY`; the harness
+  runs a single group of checks with `HARNESS_ONLY=<group>`.
 
 ## 0.5.0 – 2026-11-23
 
