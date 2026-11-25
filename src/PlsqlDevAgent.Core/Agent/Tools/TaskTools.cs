@@ -49,7 +49,11 @@ namespace PlsqlDevAgent.Agent.Tools
             var open = tasks.Where(t => (string)t["status"] != "completed").Select(t => (string)t["content"]).ToList();
             return Task.FromResult($"Task list updated: {done}/{tasks.Count} completed." +
                                    (current != null ? $" In progress: {current["content"]}." : "") +
-                                   (open.Count > 0 ? " Continue with the open tasks." : " All tasks are completed: give the user a short summary."));
+                                   (open.Count > 0 ? " Continue with the open tasks."
+                                    // models that write the summary and tick off the last task in one response would
+                                    // otherwise repeat the whole summary after this result
+                                    : " All tasks are completed. If you have not summarized the result for the user yet, do it now, " +
+                                      "briefly; if your summary is already in this response, end without repeating it."));
         }
 
         /// <summary>Accepts the array or a JSON string (some local models stringify nested arrays).</summary>

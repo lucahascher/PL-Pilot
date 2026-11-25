@@ -261,6 +261,26 @@ namespace PlsqlDevAgent.Harness
                 return Final("All done: Task A and Task B are finished.");
             }
 
+            // the model announces its next step and forgets the tool call; after the nudge it makes the call
+            if (request.Contains("ANNOUNCETEST"))
+            {
+                if (role == "tool") return Final("Die Tabelle EMP hat 14 Zeilen.");
+                return role == "user" && last["content"].ToString().StartsWith("[auto-continue]")
+                    ? ToolCall("an_1", "run_query", new JObject { ["sql"] = "select count(*) from emp" })
+                    : Final("Ich lese zuerst die Tabelle EMP.");
+            }
+
+            // task list, then a change without ticking off a task (the result carries the task note), then the final answer
+            // together with the completed list in ONE response (the request must end there, without another model turn)
+            if (request.Contains("TASKNOTETEST"))
+            {
+                if (taskUpdates == 0) return ToolCall("tn_1", "update_tasks", Tasks("in_progress|Change A", "pending|Check B"));
+                if (!calls.Contains("execute_sql")) return ToolCall("tn_2", "execute_sql", new JObject { ["sql"] = "begin null; end;" });
+                return Text("Zusammenfassung TASKNOTE-UNIQUE: Ich habe A geändert und B geprüft. " +
+                            string.Join(" ", Enumerable.Repeat("Alles ist erledigt und überprüft.", 8)))
+                    .Concat(ToolCall("tn_3", "update_tasks", Tasks("completed|Change A", "completed|Check B")));
+            }
+
             if (request.Contains("SUBTASK"))
                 return calls.Contains("run_subtask")
                     ? Final("Summary: the helper found EMP in EMP_API.list_emps.")

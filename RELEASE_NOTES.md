@@ -1,5 +1,52 @@
 # PL/Pilot – Release Notes
 
+## 0.6.1 – 2026-11-25
+
+Fixes in how the agent works through a request, found while recording a demo with a local model.
+
+### Fixed
+
+- **The task list follows the work.** Models tended to tick off every task only at the very end. After a change – or
+  three steps without an update – PL/Pilot now reminds the model in the newest tool result to update the list together
+  with its next step (no extra model turn).
+- **No repeated final answer.** When the model writes its summary and ticks off the last task in the same response,
+  the request ends there. Before, the model was asked once more and repeated the whole summary.
+- **"I'll start by reading the ticket." – and nothing happened.** A short answer that only announces the next step,
+  without a tool call, is now continued automatically (setting *Auto Continue*, with a notice in the chat).
+- **No loop after a cut-off tool call.** A tool call cut off by *Max tokens* is not executed and no longer counts as
+  progress, so "I will do X" after it is continued at most once instead of up to five times.
+- **Compiling a local file no longer asks where changes go.** `compile_plsql` from the editor window of a project file
+  (or with `file`) puts exactly that file into the database, so the question "database, local files or both?" is not
+  asked (unless you chose *Local files* in this chat). If the window has unsaved changes, the agent tells you to save
+  it, so that the file matches the database.
+- **Clearer context window notice:** "Context window for gemma4:31b-32k set to 32,768 tokens (was 262,144). Source:
+  Ollama, model loaded." It used to read as if Ollama were the model.
+
+### For developers
+
+- Self-test mode `PLAY:<prompt>` for screen recordings of a demo: closes restored windows, runs a SQL file in a SQL
+  window (`PLSQLDEVAGENT_AUTOTEST_PLAY_SQL`; PL/SQL Developer's error dialog is shown and answered with *No*),
+  optionally opens a file (`…_PLAY_OPEN`), types the prompt visibly, approves each card after a pause
+  (`…_PLAY_PAUSE_MS`, default 3000), answers questions (`…_PLAY_ANSWER`), runs the SQL file again and leaves PL/SQL
+  Developer open.
+- MCP test server: `MCP_DATA` loads more tickets and commits from a JSON file.
+- Harness: 245 checks (new: announced steps, task list note, final answer with the completed task list, no loop after
+  a cut-off call, compiling a local file without the question).
+
+### Tested
+
+- Harness (simulated IDE, scripted model): 245 checks passed.
+- In PL/SQL Developer 17 against Oracle 23ai, with gemma4:31b (Ollama, 32k context), company rules and an MCP ticket
+  server, a demo request (read the ticket over MCP, change the package, compile, test, comment on the ticket):
+  - Earlier runs found the problems: tasks ticked off only at the end, a repeated summary (in two runs), and one run that
+    stopped after "Ich beginne damit, das Ticket AUF-4711 zu lesen" without a tool call.
+  - Three runs with all fixes: the task list was updated step by step (e.g. 0/6 → 1/6 → 2/6 → 3/6 → 4/6 → 5/6 → 6/6), the final
+    answer appeared once, and the fixed package was correct in the database (checked after the first and the last run).
+  - Two of them with the project folder: the agent found and opened the local file itself, changed it in the editor and
+    compiled it without the "where do changes go?" question. In one run the model then wrote the file itself, which
+    asked that question after all; the note to the model now says not to do that.
+- The new wording of that note was not run with a model again.
+
 ## 0.6.0 – 2026-11-25
 
 This release fixes what got in the way in daily work: large packages that could not be changed, a frozen PL/SQL

@@ -599,18 +599,25 @@ namespace PlsqlDevAgent.Agent
                     // Self-prompting: keep the agent going while its task list has open items (or it was cut off),
                     // but only if it made progress since the last nudge, so it cannot loop without doing anything.
                     var open = OpenTasks();
-                    if (Config.AutoContinue && !planMode && continues < Config.MaxAutoContinues && progressSinceNudge && (open.Count > 0 || cutOff))
+                    // "I start by reading the ticket." – and no tool call: the model announced its next step and forgot the call
+                    bool announced = !cutOff && open.Count == 0 && AnnouncesNextStep(turn.Content);
+                    if (Config.AutoContinue && !planMode && continues < Config.MaxAutoContinues && progressSinceNudge && (open.Count > 0 || cutOff || announced))
                     {
                         continues++;
                         progressSinceNudge = false;
                         var nudge = cutOff
                             ? $"{AutoContinuePrefix} Your answer was cut off by the length limit. Continue exactly where you stopped."
+                            : announced
+                            ? $"{AutoContinuePrefix} You announced your next step but did not call a tool, so nothing happened. " +
+                              "Call the tool now. If you are already finished, give the final answer instead."
                             : $"{AutoContinuePrefix} You stopped, but these tasks are still open:\n- {string.Join("\n- ", open)}\n" +
                               "Continue working on them now and update the task list as you go. If you are blocked or need a decision " +
                               "from the user, say exactly what you need, and if a task is no longer needed, mark it completed.";
                         _history.Add(new JObject { ["role"] = "user", ["content"] = nudge });
                         _ui.Notice(cutOff
                             ? L.T("The answer was cut off, continuing automatically ({0}/{1}).", continues, Config.MaxAutoContinues)
+                            : announced
+                            ? L.T("The model announced a step but did not run it, continuing automatically ({0}/{1}).", continues, Config.MaxAutoContinues)
                             : L.T("{0} open task(s), continuing automatically ({1}/{2}).", open.Count, continues, Config.MaxAutoContinues));
                         continue;
                     }
@@ -623,7 +630,9 @@ namespace PlsqlDevAgent.Agent
                     break;
                 }
 
-                progressSinceNudge = true;
+                // a tool call cut off by the output limit is not executed: no progress (otherwise "I will do X" + another
+                // cut-off call could be continued again and again, each time at the cost of a full max_tokens answer)
+                if (!cutOff) progressSinceNudge = true;
                 var calls = turn.ToolCalls;
                 for (int i = 0; i < calls.Count;)
                 {
@@ -639,6 +648,15 @@ namespace PlsqlDevAgent.Agent
                     for (int k = 0; k < batch.Count; k++)
                         _history.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = batch[k].Id, ["content"] = results[k] });
                     i += batch.Count;
+                }
+
+                // the model wrote its final answer and ticked off the last task in the same response: the request is done.
+                // Another model turn would only repeat the answer (the tool result cannot stop several local models from it)
+                if (calls.All(c => c.Name == "update_tasks") && _tasks.Count > 0 && OpenTasks().Count == 0
+                    && (turn.Content ?? "").Trim().Length >= FinalAnswerMinChars)
+                {
+                    Log.Info("Final answer together with the completed task list: request finished");
+                    break;
                 }
 
                 // a model that only looks things up turn after turn (search, think, search again) is reminded to focus on
@@ -670,6 +688,36 @@ namespace PlsqlDevAgent.Agent
                 }
             }
         }
+
+        /// <summary>
+        /// A short answer whose last sentence announces what the agent does next ("Ich lese zuerst das Ticket.", "Let me
+        /// check the table.") – sent without a tool call, it means the model forgot the call. Questions to the user and
+        /// long answers (summaries) never count.
+        /// </summary>
+        public static bool AnnouncesNextStep(string content)
+        {
+            var text = (content ?? "").Trim();
+            if (text.Length == 0 || text.Length > 600 || text.EndsWith("?")) return false;
+            var last = Regex.Split(text, @"(?<=[.!:])\s+").LastOrDefault(s => s.Trim().Length > 0) ?? text;
+            return NextStepPattern.IsMatch(last) && !NotAStepPattern.IsMatch(last);
+        }
+
+        private static readonly Regex NextStepPattern = new Regex(
+            // "Ich lese zuerst …", "Wir werden …"
+            @"^\W*(?:ich|wir)\s+(?:werde|werden|beginne|beginnen|starte|starten|lese|lesen|prüfe|prüfen|schaue|sehe|hole|" +
+            @"analysiere|öffne|suche|rufe|frage|untersuche|ändere|passe|kompiliere|teste)\b" +
+            // "Zuerst prüfe ich …", "Als Nächstes kompiliere ich …" (inverted word order)
+            @"|^\W*(?:zuerst|zunächst|als (?:erstes|nächstes)|jetzt|nun|dann|anschließend)\s+\w+\s+(?:ich|wir)\b" +
+            // "Let me check …", "First, I will …", "I'll start by …"
+            @"|^\W*(?:(?:first|now|next|then)\W+)?(?:i will|i'll|i am going to|i'm going to|let me|i start|i begin)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // closing phrases that only look like a next step
+        private static readonly Regex NotAStepPattern = new Regex(@"\blet me know\b|\bgerne\b|\bfalls\b|\bif you\b|\bwenn sie\b|\bwenn du\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        /// <summary>Text length from which an answer sent with the last update_tasks counts as the final answer.</summary>
+        public const int FinalAnswerMinChars = 200;
 
         /// <summary>Model turns without update_tasks (and without a change) before the task list note.</summary>
         public const int TaskNoteAfterTurns = 3;

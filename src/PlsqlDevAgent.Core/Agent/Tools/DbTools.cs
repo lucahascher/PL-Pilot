@@ -816,8 +816,11 @@ namespace PlsqlDevAgent.Agent.Tools
         private static string SummarizeSource(string source) =>
             string.Join(", ", SplitOnSlash(source).Select(p => IsPlsqlUnit(p, out var t, out var o, out var n) ? $"{t} {n}" : RunQueryTool.OneLine(p)).Take(4));
 
-        /// <summary>The code to compile from source, the editor window of the request or a project file; null + message if not possible.</summary>
-        private static (string Source, string Error) ReadInput(JObject args, ToolContext ctx)
+        /// <summary>
+        /// The code to compile from source, the editor window of the request or a project file; null + message if not possible.
+        /// LocalFile: the project file the code comes from (the file itself, or the file the editor window shows), else null.
+        /// </summary>
+        private static (string Source, string Error, string LocalFile) ReadInput(JObject args, ToolContext ctx)
         {
             var source = Str(args, "source");
             bool fromEditor = Bool(args, "from_editor", false);
@@ -825,27 +828,38 @@ namespace PlsqlDevAgent.Agent.Tools
             int given = (string.IsNullOrWhiteSpace(source) ? 0 : 1) + (fromEditor ? 1 : 0) + (string.IsNullOrWhiteSpace(file) ? 0 : 1);
             if (given != 1)
                 return (null, "Not executed: pass exactly one of source, from_editor=true or file. For changes of a unit that is already " +
-                              "in the database use edit_object_source (only the changed lines, any unit size).");
+                              "in the database use edit_object_source (only the changed lines, any unit size).", null);
             if (fromEditor)
             {
                 var c = ctx.EditorContext(out var window);
-                if (ctx.ExcludedWindowMessage(c) is string excluded) return (null, excluded);
+                if (ctx.ExcludedWindowMessage(c) is string excluded) return (null, excluded, null);
                 var text = ctx.Ide.GetEditorText(window);
-                return string.IsNullOrWhiteSpace(text) ? (null, $"Not executed: the {c.WindowName} is empty.") : (text, null);
+                if (string.IsNullOrWhiteSpace(text)) return (null, $"Not executed: the {c.WindowName} is empty.", null);
+                return (text, null, InProjectFolder(ctx, c.FileName) ? System.IO.Path.GetFullPath(c.FileName) : null);
             }
             if (!string.IsNullOrWhiteSpace(file))
             {
-                if (!ctx.Config.HasWorkspace) return (null, "Not executed: no project folder is configured, so file is not available.");
+                if (!ctx.Config.HasWorkspace) return (null, "Not executed: no project folder is configured, so file is not available.", null);
                 var path = Workspace.Resolve(ctx, file);
-                if (!System.IO.File.Exists(path)) return (null, $"Not executed: file {file} not found in the project folder (list_files, find_object_files).");
-                return (TextFile.Read(path, out _), null);
+                if (!System.IO.File.Exists(path)) return (null, $"Not executed: file {file} not found in the project folder (list_files, find_object_files).", null);
+                return (TextFile.Read(path, out _), null, path);
             }
-            return (source, null);
+            return (source, null, null);
+        }
+
+        private static bool InProjectFolder(ToolContext ctx, string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !ctx.Config.HasWorkspace) return false;
+            try
+            {
+                return System.IO.Path.GetFullPath(path).StartsWith(Workspace.Root(ctx) + "\\", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception) { return false; }
         }
 
         public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
-            var (source, inputError) = ReadInput(args, ctx);
+            var (source, inputError, localFile) = ReadInput(args, ctx);
             if (inputError != null) return inputError;
             var parts = SplitOnSlash(source);
             if (parts.Count == 0) return "Nothing to compile.";
@@ -856,12 +870,17 @@ namespace PlsqlDevAgent.Agent.Tools
                            "Use execute_sql for other statements. Offending part starts with: " + RunQueryTool.OneLine(p);
             }
 
-            // objects that also have local source files: the database, the local files or both (asked once per chat)
+            // objects that also have local source files: the database, the local files or both (asked once per chat). Code that
+            // comes from a local file itself goes into the database exactly as in that file – nothing to decide, unless the
+            // user wanted changes in the local files only
             var changed = new List<(string Type, string Owner, string Name)>();
             foreach (var p in parts)
                 if (IsPlsqlUnit(PrepareStatement(p), out var t, out var o, out var n)) changed.Add((t, o ?? ctx.CurrentSchema, n));
-            var (proceed, localNote) = await LocalChanges.CheckAsync(ctx, changed);
+            var (proceed, localNote) = localFile != null && ctx.ChangeTarget?.Value != LocalChanges.Local
+                ? (true, null)
+                : await LocalChanges.CheckAsync(ctx, changed);
             if (!proceed) return localNote;
+            localNote = localNote ?? UnsavedFileNote(localFile, source);
 
             var sensitive = parts.Select(SensitiveUnitReason).FirstOrDefault(r => r != null);
             if (!ctx.Config.AutoApproveSql || sensitive != null)
@@ -887,6 +906,24 @@ namespace PlsqlDevAgent.Agent.Tools
 
             var result = Compile(ctx, parts, "compile", Bool(args, "keep_settings", true));
             return localNote == null ? result : result.TrimEnd() + "\n\n" + localNote;
+        }
+
+        /// <summary>
+        /// Compiled from the editor window of a local file whose text differs from the file on disk: the window has unsaved
+        /// changes, so the file in the project folder (version control) still has the old version.
+        /// </summary>
+        private static string UnsavedFileNote(string localFile, string compiled)
+        {
+            if (localFile == null) return null;
+            try
+            {
+                string Norm(string s) => (s ?? "").Replace("\r\n", "\n").TrimEnd();
+                if (!System.IO.File.Exists(localFile) || Norm(TextFile.Read(localFile, out _)) == Norm(compiled)) return null;
+                return $"Note: the editor window of the local file {System.IO.Path.GetFileName(localFile)} has unsaved changes – the file " +
+                       "on disk still has the old version. Do not write the file yourself (the open window would then differ from it): " +
+                       "tell the user to save the window (Ctrl+S) so that the file matches the database.";
+            }
+            catch (Exception) { return null; }
         }
 
         /// <summary>

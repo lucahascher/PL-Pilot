@@ -619,7 +619,8 @@ namespace PlsqlDevAgent.Testing
         /// PLSQLDEVAGENT_AUTOTEST_PLAY_SQL (if set) in a SQL window, opens the file PLSQLDEVAGENT_AUTOTEST_PLAY_OPEN (if set,
         /// e.g. a package body to edit), types the prompt visibly into the chat, approves every
         /// card after a pause so it can be read (PLSQLDEVAGENT_AUTOTEST_PLAY_PAUSE_MS, default 3000; destructive cards are
-        /// rejected), runs the SQL file again at the end and leaves PL/SQL Developer open.
+        /// rejected; questions get the option containing PLSQLDEVAGENT_AUTOTEST_PLAY_ANSWER, else the first one), runs the
+        /// SQL file again at the end and leaves PL/SQL Developer open.
         /// </summary>
         private static async Task PlayRunAsync(Plugin plugin, string prompt)
         {
@@ -629,14 +630,15 @@ namespace PlsqlDevAgent.Testing
             try
             {
                 Line("# PL/Pilot – play mode (screen recording)");
+                CloseAllWindows(); // PL/SQL Developer restores the windows of the last session: start the recording clean
                 string sql = string.IsNullOrWhiteSpace(sqlFile) ? null : File.ReadAllText(sqlFile, Encoding.UTF8).Trim();
-                if (sql != null) await RunInSqlWindow(ide, sql, pause);
+                if (sql != null) await RunInSqlWindow(ide, sql, pause, closeOthers: true);
                 // the file the request is about, e.g. a package body from the version control checkout: it becomes the
                 // active window, so the agent edits it visibly in the editor
                 var openFile = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PLAY_OPEN");
                 if (!string.IsNullOrWhiteSpace(openFile))
                 {
-                    Line($"Opened {openFile}: {ide.OpenFile(openFile)}");
+                    Line($"Opened {openFile}: {ide.OpenFile(openFile)}; windows: {WindowList()}");
                     await Task.Delay(pause);
                 }
 
@@ -650,7 +652,7 @@ namespace PlsqlDevAgent.Testing
                     + "; let i = 0; el.focus(); const h = setInterval(() => { el.value = t.slice(0, ++i); el.dispatchEvent(new Event('input')); "
                     + "if (i >= t.length) clearInterval(h); }, " + typingMs + "); })()");
                 await Task.Delay(prompt.Length * typingMs + pause);
-                await chat.ExecuteScriptAsync(PausedApprover(pause));
+                await chat.ExecuteScriptAsync(PausedApprover(pause, Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PLAY_ANSWER")));
                 await chat.ExecuteScriptAsync("submit();");
                 Line("Prompt: " + prompt);
 
@@ -662,7 +664,7 @@ namespace PlsqlDevAgent.Testing
                     if (chat.IsBusy) sawBusy = true;
                     else if (sawBusy || sw.Elapsed > TimeSpan.FromSeconds(30)) break;
                 }
-                Line($"Agent finished after {sw.Elapsed.TotalSeconds:0} s (still busy: {chat.IsBusy})");
+                Line($"Agent finished after {sw.Elapsed.TotalSeconds:0} s (still busy: {chat.IsBusy}); windows: {WindowList()}");
                 var transcript = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"") ?? "";
                 File.WriteAllText(Path.Combine(_dir, "transcript-play.txt"), transcript, Encoding.UTF8);
 
@@ -682,9 +684,10 @@ namespace PlsqlDevAgent.Testing
         /// PL/SQL Developer's modal error dialog ("View program sources of error stack?"); it stays visible for two
         /// pauses so it can be read and is then closed (= Cancel).
         /// </summary>
-        private static async Task RunInSqlWindow(IIde ide, string sql, int pause)
+        private static async Task RunInSqlWindow(IIde ide, string sql, int pause, bool closeOthers = false)
         {
             ide.NewWindow(IdeWindowType.Sql, sql);
+            long sqlWindow = MainThread.Invoke(() => (long)Callbacks.IDE_GetEditorHandle());
             await Task.Delay(Math.Max(500, pause / 2));
             MainThread.Invoke(() => { Callbacks.IDE_Perform(1); }); // Execute
             var sw = Stopwatch.StartNew();
@@ -695,15 +698,56 @@ namespace PlsqlDevAgent.Testing
                 if (dialog != IntPtr.Zero)
                 {
                     await Task.Delay(pause * 2);
-                    PostMessage(dialog, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
-                    Line("Error dialog shown and closed.");
+                    // "Cancel": "Yes" opens the program sources of the error stack, "No" was seen opening the failing unit too
+                    var cancel = FindChildButton(dialog, "Cancel", "&Cancel", "Abbrechen", "&Abbrechen");
+                    if (cancel != IntPtr.Zero) PostMessage(cancel, 0x00F5 /* BM_CLICK */, IntPtr.Zero, IntPtr.Zero);
+                    else PostMessage(dialog, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
+                    Line($"Error dialog shown and closed ({(cancel != IntPtr.Zero ? "Cancel" : "WM_CLOSE")}); windows: {WindowList()}");
                     await Task.Delay(500);
                     continue;
                 }
                 if (MainThread.Invoke(() => Callbacks.IDE_WindowIsRunning()) == 0) break;
             }
-            Line($"SQL window executed ({sw.Elapsed.TotalSeconds:0} s).");
+            Line($"SQL window executed ({sw.Elapsed.TotalSeconds:0} s); windows: {WindowList()}");
+            if (closeOthers)
+            {
+                // windows that PL/SQL Developer restored from the last session or opened for the error stack meanwhile
+                await Task.Delay(1000);
+                CloseWindowsExcept(sqlWindow);
+            }
             await Task.Delay(pause);
+        }
+
+        /// <summary>Closes every window except the one with this editor control (modified ones are saved to the log folder first).</summary>
+        private static void CloseWindowsExcept(long keepEditor)
+        {
+            var tmp = Path.Combine(_dir, "closed-windows");
+            Directory.CreateDirectory(tmp);
+            int closed = MainThread.Invoke(() =>
+            {
+                int n = 0;
+                for (int guard = 0; guard < 30; guard++)
+                {
+                    int index = -1, count = Callbacks.IDE_GetWindowCount();
+                    try
+                    {
+                        for (int i = 0; i < count && index < 0; i++)
+                            if (Callbacks.IDE_SelectWindow(i) != 0 && Callbacks.IDE_GetEditorHandle() != keepEditor) index = i;
+                    }
+                    finally { Callbacks.IDE_SelectWindow(0); }
+                    if (index < 0) break;
+                    Callbacks.IDE_ActivateWindow(index);
+                    if (Callbacks.IDE_WindowIsModified() != 0)
+                    {
+                        using (var f = new Callbacks.NativeString(Path.Combine(tmp, $"other{guard}.sql"))) Callbacks.IDE_SetFilename(f.Ptr);
+                        Callbacks.IDE_SaveFile();
+                    }
+                    Callbacks.IDE_CloseFile();
+                    n++;
+                }
+                return n;
+            });
+            Line($"Closed {closed} other window(s); windows: {WindowList()}");
         }
 
         /// <summary>A visible top-level window of this process titled "Error" / "Fehler" (PL/SQL Developer's error dialog).</summary>
@@ -725,18 +769,43 @@ namespace PlsqlDevAgent.Testing
             return found;
         }
 
+        /// <summary>A child control (button) of the dialog whose text is one of the captions.</summary>
+        private static IntPtr FindChildButton(IntPtr dialog, params string[] captions)
+        {
+            IntPtr found = IntPtr.Zero;
+            EnumChildWindows(dialog, (h, l) =>
+            {
+                var text = new StringBuilder(64);
+                GetWindowText(h, text, text.Capacity);
+                if (!captions.Contains(text.ToString())) return true;
+                found = h;
+                return false;
+            }, IntPtr.Zero);
+            return found;
+        }
+
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc callback, IntPtr lParam);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
 
-        /// <summary>Approves each card once it has been visible for <paramref name="pauseMs"/>; destructive cards are rejected.</summary>
-        private static string PausedApprover(int pauseMs) => @"(() => { const seen = new WeakMap(), clicked = new WeakSet(); setInterval(() => {
-            const c = document.querySelector('.approval:not(.done):not(.question)'); if (!c || clicked.has(c)) return;
+        /// <summary>
+        /// Approves each card once it has been visible for <paramref name="pauseMs"/>; destructive cards are rejected. A
+        /// question of the agent is answered with the option containing <paramref name="answer"/> (else the first option).
+        /// </summary>
+        private static string PausedApprover(int pauseMs, string answer) => @"(() => { const seen = new WeakMap(), clicked = new WeakSet(), wanted = "
+            + JsonConvert.SerializeObject((answer ?? "").ToLowerInvariant()) + @"; setInterval(() => {
+            const c = document.querySelector('.approval:not(.done)'); if (!c || clicked.has(c)) return;
             if (!seen.has(c)) { seen.set(c, Date.now()); c.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return; }
             if (Date.now() - seen.get(c) < " + pauseMs + @") return;
             clicked.add(c);
-            if (c.querySelector('.warn')) { c.querySelector('input').value = 'Nein - keine bestehenden Daten löschen oder ändern.'; c.querySelector('button[data-a=""no""]').click(); }
+            if (c.classList.contains('question')) {
+              const options = Array.from(c.querySelectorAll('button[data-i]'));
+              const pick = (wanted && options.find(b => b.innerText.toLowerCase().includes(wanted))) || options[0];
+              if (pick) pick.click();
+            }
+            else if (c.querySelector('.warn')) { c.querySelector('input').value = 'Nein - keine bestehenden Daten löschen oder ändern.'; c.querySelector('button[data-a=""no""]').click(); }
             else c.querySelector('button.primary').click();
           }, 250); })()";
 

@@ -119,6 +119,8 @@ namespace PlsqlDevAgent.Util
             ["Reached {0} steps, continuing automatically ({1}/{2})."] = "{0} Schritte erreicht, wird automatisch fortgesetzt ({1}/{2}).",
             ["Stopped after {0} steps. Send \"continue\" to let the agent go on."] = "Nach {0} Schritten angehalten. Mit „weiter“ arbeitet der Agent weiter.",
             ["{0} open task(s), continuing automatically ({1}/{2})."] = "{0} offene Aufgabe(n), wird automatisch fortgesetzt ({1}/{2}).",
+            ["The model announced a step but did not run it, continuing automatically ({0}/{1})."] =
+                "Das Modell hat einen Schritt angekündigt, aber nicht ausgeführt – wird automatisch fortgesetzt ({0}/{1}).",
             ["The answer was cut off, continuing automatically ({0}/{1})."] = "Die Antwort wurde abgeschnitten, wird automatisch fortgesetzt ({0}/{1}).",
             ["The answer was cut off because it reached the max tokens limit (Settings, Max tokens)."] = "Die Antwort wurde abgeschnitten, weil das Token-Limit erreicht wurde (Einstellungen, Max. Tokens).",
             ["The model returned an empty answer."] = "Das Modell hat eine leere Antwort geliefert.",

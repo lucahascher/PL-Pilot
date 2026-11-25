@@ -197,7 +197,7 @@ namespace PlsqlDevAgent.Harness
                     if (!string.IsNullOrEmpty(only))
                         await (Task)GetType().GetMethod(only, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(this, null);
                     else if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SpeedChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); await McpChecks(); await McpTeamChecks(); await SourceReadChecks(); await ExploreChecks(); await WindowAndProgressChecks(); await BindingAndLargeUnitChecks(); await SerialSqlChecks(); await LocalFilesChecks(); await FocusChecks(); }
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SpeedChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); await McpChecks(); await McpTeamChecks(); await SourceReadChecks(); await ExploreChecks(); await WindowAndProgressChecks(); await BindingAndLargeUnitChecks(); await SerialSqlChecks(); await LocalFilesChecks(); await FocusChecks(); await AgentLoopChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -667,6 +667,9 @@ namespace PlsqlDevAgent.Harness
                 !_ide.ExecutedSql.Skip(before).Any(s => s.StartsWith("create or replace", StringComparison.OrdinalIgnoreCase)) &&
                 input.Length < 1700 && input.Contains("characters)") && notices.Contains("max tokens limit") &&
                 msgs.Contains("edit_object_source instead"));
+            // "I will …" after a cut-off call may be continued once, but a cut-off call is no progress: no loop of full-length answers
+            int announcedNotices = System.Text.RegularExpressions.Regex.Matches(notices, "announced a step").Count;
+            Check($"a cut-off tool call is no progress: \"I will …\" after it is continued at most once ({announcedNotices})", announcedNotices <= 1);
             await NewChat();
             await SendAndWait("CUTOFFTEXT");
             msgs = await Js("document.getElementById('messages').innerText");
@@ -815,6 +818,30 @@ namespace PlsqlDevAgent.Harness
                     card.Contains("Where should the change go?") && card.Contains("Both") && status.Contains("Waiting for your answer") &&
                     LastToolResult() == "The user chose: Local files" &&
                     (await Js("document.querySelector('.approval.question.done .verdict').innerText")).Contains("Answer: Local files"));
+
+                // code compiled from a local file goes into the database exactly as in that file: nothing to decide
+                Put(@"SCOTT\procedures\bonus_calc.prc", "create or replace procedure bonus_calc is\r\nbegin\r\n  null;\r\nend bonus_calc;\r\n/\r\n");
+                await NewChat();
+                await SendAndWait("TOOL: find_object_files {\"names\":[\"BONUS_CALC\"]}");
+                bool indexed = LastToolResult().Contains("procedures/bonus_calc.prc");
+                await Js(AutoApproveJs);
+                await Submit("TOOL: compile_plsql {\"file\":\"SCOTT/procedures/bonus_calc.prc\"}");
+                bool asked = false;
+                for (int i = 0; i < 100; i++)
+                {
+                    await Task.Delay(100);
+                    if ((await Js("document.querySelectorAll('.approval.question:not(.done)').length")) != "0")
+                    {
+                        asked = true;
+                        await Task.Delay(800);
+                        await Js("Array.from(document.querySelectorAll('.approval.question:not(.done) button')).find(b => b.innerText === 'Database').click()");
+                    }
+                    if (i > 5 && !_chat.IsBusy) break;
+                }
+                await WaitIdle();
+                await Js("clearInterval(window.__autoApprove)");
+                Check($"compiling a local file of the project folder does not ask where changes go (indexed: {indexed}, asked: {asked}; {LastToolResult()})",
+                    indexed && !asked && _ide.ExecutedSql.Any(s => s.IndexOf("procedure bonus_calc", StringComparison.OrdinalIgnoreCase) >= 0));
             }
             finally
             {
@@ -840,6 +867,37 @@ namespace PlsqlDevAgent.Harness
                 MockLlmServer.LastSystemPrompt.Contains("# Working method: goal first, few large steps") &&
                 MockLlmServer.LastSystemPrompt.Contains("# Large databases (many schemas, thousands of objects)") &&
                 MockLlmServer.LastSystemPrompt.Contains("Locate before you read"));
+        }
+
+        /// <summary>
+        /// The agent loop around the model's habits: a step announced without a tool call, a task list ticked off only at
+        /// the end, and a final answer repeated after the last update_tasks.
+        /// </summary>
+        private async Task AgentLoopChecks()
+        {
+            var steps = new[] { "Ich beginne damit, das Ticket AUF-4711 zu lesen, um die Anforderungen zu verstehen.", "Zuerst prüfe ich die Daten.",
+                                "Als Nächstes kompiliere ich das Package.", "Let me check the table EMP.", "I'll start by reading the ticket." };
+            var answers = new[] { "Ich habe das Ticket bearbeitet und die Lösung dokumentiert.", "Soll ich auch Task B erledigen?",
+                                  "Let me know if you need anything else.", "Done.", "Die Tabelle hat 14 Zeilen. Falls Sie mehr wissen möchten, frage ich gerne nach.",
+                                  string.Concat(Enumerable.Repeat("Zusammenfassung der Änderungen. ", 25)) + "Ich werde das im nächsten Release prüfen." };
+            var wrong = steps.Where(s => !AgentSession.AnnouncesNextStep(s)).Concat(answers.Where(AgentSession.AnnouncesNextStep)).ToList();
+            Check("announced next steps are recognized, answers, questions and closing phrases are not" + (wrong.Count > 0 ? ": " + string.Join(" / ", wrong) : ""), wrong.Count == 0);
+
+            await NewChat();
+            await SendAndWait("ANNOUNCETEST");
+            var text = await Js("document.getElementById('messages').innerText");
+            Check("a step announced without a tool call continues automatically and the tool runs",
+                text.Contains("announced a step but did not run it") && _ide.ExecutedSql.Any(s => s.Contains("select count(*) from emp")) && text.Contains("Die Tabelle EMP hat 14 Zeilen."));
+
+            await NewChat();
+            await SendAndWait("TASKNOTETEST");
+            var last = MockLlmServer.MainRequests.Last();
+            var lastMessage = (Newtonsoft.Json.Linq.JObject)last.Last;
+            Check("after a change without a task update, the tool result reminds the model of the task list",
+                last.Any(m => (string)m["role"] == "tool" && ((string)m["content"] ?? "").Contains("the user watches your task list; it shows 0/2 completed")));
+            Check("final answer + completed task list in one response ends the request (no repeated answer)",
+                (string)lastMessage["role"] == "tool" && ((string)lastMessage["content"] ?? "").Contains("the user watches your task list") &&
+                System.Text.RegularExpressions.Regex.Matches(await Js("document.getElementById('messages').innerText"), "TASKNOTE-UNIQUE").Count == 1);
         }
 
         /// <summary>Team configuration (mcp.json), prompts as slash commands, resources as @server:… mentions.</summary>
