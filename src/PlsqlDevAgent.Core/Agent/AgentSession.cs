@@ -503,7 +503,7 @@ namespace PlsqlDevAgent.Agent
             _history.Add(userMessage);
             if (_checkpoint != null) _checkpointMessages[_checkpoint] = (string)userMessage["content"];
 
-            int continues = 0, stepsInRound = 0, lookupTurns = 0, focusNudges = 0, rawToolCalls = 0;
+            int continues = 0, stepsInRound = 0, lookupTurns = 0, focusNudges = 0, rawToolCalls = 0, turnsSinceTasks = 0;
             bool progressSinceNudge = true;
             for (int step = 0; ; step++, stepsInRound++)
             {
@@ -654,7 +654,34 @@ namespace PlsqlDevAgent.Agent
                     lookupTurns = 0;
                     focusNudges++;
                 }
+
+                // the task list is what the user watches: models tend to tick everything off only at the very end. After a
+                // change, or a few turns without an update, the newest tool result reminds the model – it can update the list
+                // together with its next step, so this costs no extra model turn
+                bool tasksUpdated = calls.Any(c => c.Name == "update_tasks");
+                bool changed = calls.Any(c => tools.FirstOrDefault(t => t.Name == c.Name)?.Mutating == true);
+                turnsSinceTasks = tasksUpdated ? 0 : turnsSinceTasks + 1;
+                if (!tasksUpdated && (changed || turnsSinceTasks >= TaskNoteAfterTurns) && OpenTasks().Count > 0
+                    && _history.Last is JObject newest && (string)newest["role"] == "tool")
+                {
+                    newest["content"] = (string)newest["content"] + "\n\n" + TaskNote(_tasks);
+                    Log.Info($"Task list note ({(changed ? "after a change" : $"{turnsSinceTasks} turns without an update")})");
+                    turnsSinceTasks = 0;
+                }
             }
+        }
+
+        /// <summary>Model turns without update_tasks (and without a change) before the task list note.</summary>
+        public const int TaskNoteAfterTurns = 3;
+
+        internal static string TaskNote(JArray tasks)
+        {
+            int done = tasks.Count(t => (string)t["status"] == "completed");
+            var current = tasks.FirstOrDefault(t => (string)t["status"] == "in_progress");
+            return $"[Note from PL/Pilot: the user watches your task list; it shows {done}/{tasks.Count} completed" +
+                   (current != null ? $", in progress: \"{current["content"]}\"" : "") +
+                   ". If what you just did finished a task, mark it completed and set the next one in_progress with update_tasks – " +
+                   "in the same response as your next tool call, not at the end.]";
         }
 
         /// <summary>For the model: its tool call was cut off by the output limit, and how to avoid large arguments.</summary>

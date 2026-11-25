@@ -56,6 +56,7 @@ namespace PlsqlDevAgent.Testing
             else if (mode == "BIGUNIT-LLM") await BigUnitLlmRunAsync(plugin);
             else if (mode == "PARALLEL-ONLY") await ParallelRunAsync(plugin);
             else if (mode != null && mode.StartsWith("PROMPT-ONLY:")) await PromptOnlyRunAsync(plugin, mode.Substring("PROMPT-ONLY:".Length).Trim());
+            else if (mode != null && mode.StartsWith("PLAY:")) await PlayRunAsync(plugin, mode.Substring("PLAY:".Length).Trim());
             else await RunAsync(plugin);
         }
 
@@ -612,6 +613,132 @@ namespace PlsqlDevAgent.Testing
                 await CloseIde();
             }
         }
+
+        /// <summary>
+        /// PLSQLDEVAGENT_AUTOTEST_PROMPT = "PLAY:&lt;text&gt;": a run to film (screen recording of a demo). Runs the SQL file
+        /// PLSQLDEVAGENT_AUTOTEST_PLAY_SQL (if set) in a SQL window, opens the file PLSQLDEVAGENT_AUTOTEST_PLAY_OPEN (if set,
+        /// e.g. a package body to edit), types the prompt visibly into the chat, approves every
+        /// card after a pause so it can be read (PLSQLDEVAGENT_AUTOTEST_PLAY_PAUSE_MS, default 3000; destructive cards are
+        /// rejected), runs the SQL file again at the end and leaves PL/SQL Developer open.
+        /// </summary>
+        private static async Task PlayRunAsync(Plugin plugin, string prompt)
+        {
+            var ide = plugin.Ide;
+            int pause = int.TryParse(Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PLAY_PAUSE_MS"), out var ms) ? ms : 3000;
+            var sqlFile = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PLAY_SQL");
+            try
+            {
+                Line("# PL/Pilot – play mode (screen recording)");
+                string sql = string.IsNullOrWhiteSpace(sqlFile) ? null : File.ReadAllText(sqlFile, Encoding.UTF8).Trim();
+                if (sql != null) await RunInSqlWindow(ide, sql, pause);
+                // the file the request is about, e.g. a package body from the version control checkout: it becomes the
+                // active window, so the agent edits it visibly in the editor
+                var openFile = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_PLAY_OPEN");
+                if (!string.IsNullOrWhiteSpace(openFile))
+                {
+                    Line($"Opened {openFile}: {ide.OpenFile(openFile)}");
+                    await Task.Delay(pause);
+                }
+
+                plugin.OnMenuClick(Bootstrap.MiChat);
+                var chat = plugin.ChatWindow;
+                for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+                UseTestModel(chat);
+                await Task.Delay(pause);
+                const int typingMs = 35;
+                await chat.ExecuteScriptAsync("(() => { const el = document.getElementById('input'), t = " + JsonConvert.SerializeObject(prompt)
+                    + "; let i = 0; el.focus(); const h = setInterval(() => { el.value = t.slice(0, ++i); el.dispatchEvent(new Event('input')); "
+                    + "if (i >= t.length) clearInterval(h); }, " + typingMs + "); })()");
+                await Task.Delay(prompt.Length * typingMs + pause);
+                await chat.ExecuteScriptAsync(PausedApprover(pause));
+                await chat.ExecuteScriptAsync("submit();");
+                Line("Prompt: " + prompt);
+
+                var sw = Stopwatch.StartNew();
+                bool sawBusy = false;
+                while (sw.Elapsed < TimeSpan.FromMinutes(40))
+                {
+                    await Task.Delay(1000);
+                    if (chat.IsBusy) sawBusy = true;
+                    else if (sawBusy || sw.Elapsed > TimeSpan.FromSeconds(30)) break;
+                }
+                Line($"Agent finished after {sw.Elapsed.TotalSeconds:0} s (still busy: {chat.IsBusy})");
+                var transcript = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"") ?? "";
+                File.WriteAllText(Path.Combine(_dir, "transcript-play.txt"), transcript, Encoding.UTF8);
+
+                await Task.Delay(pause);
+                if (sql != null) await RunInSqlWindow(ide, sql, pause);
+                Line("Done – PL/SQL Developer stays open.");
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+            }
+        }
+
+        /// <summary>
+        /// Opens a SQL window with the text, executes it (like F8) and waits until it finished. A runtime error shows
+        /// PL/SQL Developer's modal error dialog ("View program sources of error stack?"); it stays visible for two
+        /// pauses so it can be read and is then closed (= Cancel).
+        /// </summary>
+        private static async Task RunInSqlWindow(IIde ide, string sql, int pause)
+        {
+            ide.NewWindow(IdeWindowType.Sql, sql);
+            await Task.Delay(Math.Max(500, pause / 2));
+            MainThread.Invoke(() => { Callbacks.IDE_Perform(1); }); // Execute
+            var sw = Stopwatch.StartNew();
+            while (sw.Elapsed < TimeSpan.FromMinutes(2))
+            {
+                await Task.Delay(250);
+                var dialog = FindErrorDialog();
+                if (dialog != IntPtr.Zero)
+                {
+                    await Task.Delay(pause * 2);
+                    PostMessage(dialog, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
+                    Line("Error dialog shown and closed.");
+                    await Task.Delay(500);
+                    continue;
+                }
+                if (MainThread.Invoke(() => Callbacks.IDE_WindowIsRunning()) == 0) break;
+            }
+            Line($"SQL window executed ({sw.Elapsed.TotalSeconds:0} s).");
+            await Task.Delay(pause);
+        }
+
+        /// <summary>A visible top-level window of this process titled "Error" / "Fehler" (PL/SQL Developer's error dialog).</summary>
+        private static IntPtr FindErrorDialog()
+        {
+            uint me = (uint)Process.GetCurrentProcess().Id;
+            IntPtr found = IntPtr.Zero;
+            EnumWindows((h, l) =>
+            {
+                if (!IsWindowVisible(h)) return true;
+                GetWindowThreadProcessId(h, out var pid);
+                if (pid != me) return true;
+                var title = new StringBuilder(64);
+                GetWindowText(h, title, title.Capacity);
+                if (title.ToString() != "Error" && title.ToString() != "Fehler") return true;
+                found = h;
+                return false;
+            }, IntPtr.Zero);
+            return found;
+        }
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        /// <summary>Approves each card once it has been visible for <paramref name="pauseMs"/>; destructive cards are rejected.</summary>
+        private static string PausedApprover(int pauseMs) => @"(() => { const seen = new WeakMap(), clicked = new WeakSet(); setInterval(() => {
+            const c = document.querySelector('.approval:not(.done):not(.question)'); if (!c || clicked.has(c)) return;
+            if (!seen.has(c)) { seen.set(c, Date.now()); c.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return; }
+            if (Date.now() - seen.get(c) < " + pauseMs + @") return;
+            clicked.add(c);
+            if (c.querySelector('.warn')) { c.querySelector('input').value = 'Nein - keine bestehenden Daten löschen oder ändern.'; c.querySelector('button[data-a=""no""]').click(); }
+            else c.querySelector('button.primary').click();
+          }, 250); })()";
 
         /// <summary>
         /// measure_sql: queries fetched in the database, binds, comparison with the same-rows check, DML rolled back
