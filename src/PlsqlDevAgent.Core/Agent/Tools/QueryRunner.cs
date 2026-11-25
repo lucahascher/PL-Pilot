@@ -115,7 +115,8 @@ namespace PlsqlDevAgent.Agent.Tools
         {
             try
             {
-                if (ctx.Ide is DbaViewsIde dba) sql = dba.Rewrite(sql, out _); // estimate what will run
+                if (ctx.DbaViewsIde is DbaViewsIde dba) sql = dba.Rewrite(sql, out _); // estimate what will run
+                sql = ctx.Serial(sql);
                 if (sql.Length > 30000) return null;
                 var id = "PDA" + Guid.NewGuid().ToString("N").Substring(0, 12).ToUpperInvariant();
                 var block =

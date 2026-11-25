@@ -163,24 +163,21 @@ namespace PlsqlDevAgent.Agent
     /// a DBA_ view (no SELECT_CATALOG_ROLE, or the view does not exist in this Oracle version), the original query runs.
     /// Statements (Execute) are never changed: they may create views or code that must keep their text.
     /// </summary>
-    internal sealed class DbaViewsIde : IIde
+    internal sealed class DbaViewsIde : IdeDecorator
     {
-        private readonly IIde _inner;
 
         /// <summary>DBA_ views that failed per connection ("USER@DB" -> view names); not tried again.</summary>
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, bool>> Unreadable =
             new System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, bool>>(StringComparer.OrdinalIgnoreCase);
 
-        public DbaViewsIde(IIde inner) { _inner = inner; }
-
-        public bool Wraps(IIde ide) => ReferenceEquals(_inner, ide);
+        public DbaViewsIde(IIde inner) : base(inner) { }
 
         /// <summary>ORA errors meaning "this DBA_ view cannot be used here" (missing, no privilege, other columns, EXPLAIN on it).</summary>
         public static bool IsFallbackError(int code) => code == 942 || code == 904 || code == 1031 || code == 1039;
 
         private System.Collections.Concurrent.ConcurrentDictionary<string, bool> UnreadableHere()
         {
-            var c = _inner.GetContext();
+            var c = Inner.GetContext();
             return Unreadable.GetOrAdd($"{c.User}@{c.Database}", _ => new System.Collections.Concurrent.ConcurrentDictionary<string, bool>());
         }
 
@@ -200,48 +197,19 @@ namespace PlsqlDevAgent.Agent
                      "(no SELECT_CATALOG_ROLE, or the view does not exist in this Oracle version). Statement: " + sql);
         }
 
-        public QueryResult Query(string sql, int maxRows)
+        public override QueryResult Query(string sql, int maxRows)
         {
             var dba = Rewrite(sql, out var used);
-            if (ReferenceEquals(dba, sql)) return _inner.Query(sql, maxRows);
+            if (ReferenceEquals(dba, sql)) return Inner.Query(sql, maxRows);
             try
             {
-                return _inner.Query(dba, maxRows);
+                return Inner.Query(dba, maxRows);
             }
             catch (OracleSqlException ex) when (IsFallbackError(ex.Code))
             {
                 MarkUnreadable(used, ex.Code, dba);
-                return _inner.Query(sql, maxRows);
+                return Inner.Query(sql, maxRows);
             }
         }
-
-        public IdeContext GetContext() => _inner.GetContext();
-        public string GetEditorText() => _inner.GetEditorText();
-        public string GetSelectedText() => _inner.GetSelectedText();
-        public void ReplaceEditorText(string expectedCurrent, string newText) => _inner.ReplaceEditorText(expectedCurrent, newText);
-        public void NewWindow(IdeWindowType type, string text) => _inner.NewWindow(type, text);
-        public List<string> GetAllEditorTexts() => _inner.GetAllEditorTexts();
-        public bool ActivateEditorWithText(string text) => _inner.ActivateEditorWithText(text);
-        public bool ObjectAction(string action, string objectType, string owner, string name) => _inner.ObjectAction(action, objectType, owner, name);
-        public bool OpenFile(string path) => _inner.OpenFile(path);
-        public string GetObjectSource(string objectType, string owner, string name) => _inner.GetObjectSource(objectType, owner, name);
-        public QueryResult GetResultGrid(int maxRows) => _inner.GetResultGrid(maxRows);
-        public ExecResult Execute(string sql) => _inner.Execute(sql);
-        public bool IsExecutingSql => _inner.IsExecutingSql;
-        public string PendingTransaction => _inner.PendingTransaction;
-        public event Action TransactionChanged { add => _inner.TransactionChanged += value; remove => _inner.TransactionChanged -= value; }
-        public bool UsesOwnSession => _inner.UsesOwnSession;
-        public string DatabaseIdentity => _inner.DatabaseIdentity;
-        public event Action DatabaseIdentityChanged { add => _inner.DatabaseIdentityChanged += value; remove => _inner.DatabaseIdentityChanged -= value; }
-        public void RefreshObject(string objectType, string owner, string name, int action) => _inner.RefreshObject(objectType, owner, name, action);
-        public void ShowDifferences(string caption1, string text1, string caption2, string text2) => _inner.ShowDifferences(caption1, text1, caption2, text2);
-        public void SetStatus(string message) => _inner.SetStatus(message);
-        public PopupObject GetPopupObject() => _inner.GetPopupObject();
-        public void ResetSession() => _inner.ResetSession();
-        public IntPtr MainWindowHandle => _inner.MainWindowHandle;
-        public bool DarkMode => _inner.DarkMode;
-        public bool CanShowDifferences => _inner.CanShowDifferences;
-        public string IdeLanguage => _inner.IdeLanguage;
-        public bool IsReal => _inner.IsReal;
     }
 }

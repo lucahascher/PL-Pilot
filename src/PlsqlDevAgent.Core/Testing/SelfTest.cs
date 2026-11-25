@@ -51,6 +51,10 @@ namespace PlsqlDevAgent.Testing
             else if (mode == "ANALYSIS-ONLY") await AnalysisRunAsync(plugin);
             else if (mode == "LLM-TOOLS") await LlmToolsRunAsync(plugin);
             else if (mode == "CACHE-MEASURE") await CacheMeasureRunAsync(plugin);
+            else if (mode == "FREEZE-MEASURE") await FreezeMeasureRunAsync(plugin);
+            else if (mode == "WINDOW-ONLY") await WindowBindingRunAsync(plugin);
+            else if (mode == "BIGUNIT-LLM") await BigUnitLlmRunAsync(plugin);
+            else if (mode == "PARALLEL-ONLY") await ParallelRunAsync(plugin);
             else if (mode != null && mode.StartsWith("PROMPT-ONLY:")) await PromptOnlyRunAsync(plugin, mode.Substring("PROMPT-ONLY:".Length).Trim());
             else await RunAsync(plugin);
         }
@@ -1646,6 +1650,511 @@ namespace PlsqlDevAgent.Testing
                 File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
                 await CloseIde();
             }
+        }
+
+        /// <summary>
+        /// Measures how responsive PL/SQL Developer's main thread is while the agent works in the background (user report
+        /// 2026-11-25: the IDE froze while helper agents ran). A probe thread posts a work item to the main thread every
+        /// 50 ms and records how long it waited; a second probe makes the IDE read a view through its own session
+        /// (IDE_GetObjectSource), like the IDE does when the user opens an object.
+        /// </summary>
+        private static async Task FreezeMeasureRunAsync(Plugin plugin)
+        {
+            var ide = plugin.Ide;
+            var probe = new MainThreadProbe();
+            var timer = new System.Windows.Forms.Timer { Interval = 50 };
+            try
+            {
+                Line("# PL/Pilot – main thread responsiveness while the agent works");
+                // PLSQLDEVAGENT_AUTOTEST_SHARED=1: the agent shares PL/SQL Developer's main session (its SQL runs on the main thread)
+                bool shared = Environment.GetEnvironmentVariable("PLSQLDEVAGENT_AUTOTEST_SHARED") == "1";
+                void UseSharedSession()
+                {
+                    if (!shared) return;
+                    if (ide is PlsqlIde pi) { pi.UseSeparateSession = false; pi.ResetSession(); }
+                    else Line("(cannot switch the session: " + ide.GetType().Name + ")");
+                }
+                UseSharedSession();
+                // WM_TIMER comes after input and painting: the gaps of a 50 ms timer show whether the IDE could react to the user
+                var gaps = new System.Collections.Generic.List<long>();
+                var sinceTick = Stopwatch.StartNew();
+                timer.Tick += (s2, e2) => { lock (gaps) gaps.Add(sinceTick.ElapsedMilliseconds); sinceTick.Restart(); };
+                timer.Start();
+                var cfg = AgentConfig.Load();
+                var ctx = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+                await Task.Run(() => ide.Execute("create or replace view pda_freeze_v as select dummy from dual"));
+                Line($"Separate session: {ide.UsesOwnSession}\n");
+                Line("| Phase | seconds | main thread: probes | max wait ms | waits > 250 ms | IDE view reads | slowest read ms | timer ticks | longest timer gap ms |");
+                Line("|---|---|---|---|---|---|---|---|---|");
+
+                async Task Phase(string label, Func<Task> work, bool ideReads)
+                {
+                    var reads = new System.Collections.Generic.List<long>();
+                    var stop = new System.Threading.CancellationTokenSource();
+                    var reader = !ideReads ? Task.CompletedTask : Task.Run(async () =>
+                    {
+                        while (!stop.IsCancellationRequested)
+                        {
+                            var sw = Stopwatch.StartNew();
+                            try { ide.GetObjectSource("VIEW", ide.GetContext().User.ToUpperInvariant(), "PDA_FREEZE_V"); } catch { }
+                            lock (reads) reads.Add(sw.ElapsedMilliseconds);
+                            try { await Task.Delay(700, stop.Token); } catch (OperationCanceledException) { }
+                        }
+                    });
+                    var watch = Stopwatch.StartNew();
+                    probe.Reset();
+                    lock (gaps) gaps.Clear();
+                    try { await work(); }
+                    catch (Exception ex) { Line($"(phase {label} failed: {ex.GetBaseException().Message.Split('\n')[0]})"); }
+                    stop.Cancel();
+                    await reader;
+                    var s = probe.Snapshot();
+                    long[] g; lock (gaps) g = gaps.ToArray();
+                    Line($"| {label} | {watch.Elapsed.TotalSeconds:0.0} | {s.Count} | {s.Max} | {s.Over250} | {reads.Count} | {(reads.Count > 0 ? reads.Max() : 0)} | {g.Length} | {(g.Length > 0 ? g.Max() : 0)} |");
+                }
+
+                await Phase("idle", () => Task.Delay(2000), false);
+                await Phase("IDE view reads, SQL thread idle", () => Task.Delay(4000), true);
+                await Phase("one 6 s statement on the SQL thread", () => Task.Run(() => ide.Query(SlowQuery(6), 1)), false);
+                await Phase("one 6 s statement + IDE view reads", () => Task.Run(() => ide.Query(SlowQuery(6), 1)), true);
+
+                // helper-like load: three workers running read-only tools back to back, as parallel run_subtask helpers do
+                string[][] jobs =
+                {
+                    new[] { "explore_objects", "{\"names\":[\"EMP\"]}" },
+                    new[] { "get_object_source", "{\"name\":\"EMP_API\"}" },
+                    new[] { "describe_object", "{\"name\":\"EMP\"}" },
+                    new[] { "search_source", "{\"text\":\"emp\"}" },
+                    new[] { "list_objects", "{}" },
+                    new[] { "find_dependencies", "{\"name\":\"EMP\"}" },
+                };
+                int toolRuns = 0;
+                async Task Workers(int seconds)
+                {
+                    var until = DateTime.UtcNow.AddSeconds(seconds);
+                    await Task.WhenAll(Enumerable.Range(0, 3).Select(w => Task.Run(() =>
+                    {
+                        for (int i = w; DateTime.UtcNow < until; i++)
+                        {
+                            var job = jobs[i % jobs.Length];
+                            var tool = ToolRegistry.All().FirstOrDefault(t => t.Name == job[0]);
+                            if (tool == null) continue;
+                            try { tool.ExecuteAsync(JObject.Parse(job[1]), ctx).GetAwaiter().GetResult(); } catch { }
+                            System.Threading.Interlocked.Increment(ref toolRuns);
+                        }
+                    })));
+                }
+                await Phase("3 parallel tool loops (helper-like)", () => Workers(12), false);
+                await Phase("3 parallel tool loops + IDE view reads", () => Workers(12), true);
+                Line($"\nTool runs in the two loop phases: {toolRuns}");
+
+                // the real thing: helper agents of the configured (or PLSQLDEVAGENT_AUTOTEST_MODEL) model
+                plugin.OnMenuClick(Bootstrap.MiChat);
+                var chat = plugin.ChatWindow;
+                for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+                UseTestModel(chat);
+                UseSharedSession(); // opening the chat applied the setting again
+                await Phase("real run_subtask helpers (chat) + IDE view reads", () => SendAndWait(chat,
+                    "Call run_subtask twice in the same response (they run in parallel): helper 1 finds which objects in my schema " +
+                    "reference the table EMP, helper 2 summarizes what the package EMP_API does. Then summarize both reports in two sentences."), true);
+                var sub = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("[...document.querySelectorAll('.substeps')].map(s => s.innerText).join(' | ')") ?? "\"\"");
+                Line("Helper steps: " + sub.Replace("\n", " "));
+                Line("\nSlowest main-thread waits overall: " + string.Join(", ", probe.Worst(10)));
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                probe.Dispose();
+                timer.Stop();
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
+        }
+
+        /// <summary>
+        /// The editor window of a request while the user activates other windows (IDE_SelectWindow: read and write a window
+        /// that is not in front, which stays in the background), and large units (a 4,000-line package body changed with
+        /// edit_object_source, compile_plsql from the editor window of the request).
+        /// </summary>
+        private static async Task WindowBindingRunAsync(Plugin plugin)
+        {
+            var ide = plugin.Ide;
+            try
+            {
+                Line("# PL/Pilot – editor window of a request, large units");
+                var cfg = AgentConfig.Load();
+                CloseAllWindows();
+                ide.NewWindow(IdeWindowType.Sql, "select 'A' x from dual");
+                await Task.Delay(500);
+                var a = await Task.Run(() => ide.GetContext());
+                var target = EditorTarget.From(a);
+                Line($"Window A: {a.WindowName}, editor control {a.EditorHandle}");
+                Check("the active window has an editor control handle", a.EditorHandle != 0);
+                ide.NewWindow(IdeWindowType.Sql, "select 'B' x from dual");
+                await Task.Delay(500);
+                var b = await Task.Run(() => ide.GetContext());
+                Check($"window B is in front with another editor control ({b.EditorHandle})", b.EditorHandle != 0 && b.EditorHandle != a.EditorHandle);
+                var textA = await Task.Run(() => ide.GetEditorText(target));
+                var ctxA = await Task.Run(() => ide.GetWindowContext(target));
+                Check($"window A is read while B is in front ({textA.Trim()})", textA.Contains("'A'") && ctxA.EditorHandle == a.EditorHandle);
+                await Task.Run(() => ide.ReplaceEditorText(textA, "select 'A2' x from dual", target));
+                var now = await Task.Run(() => ide.GetContext());
+                var aAfter = await Task.Run(() => ide.GetEditorText(target));
+                var bText = await Task.Run(() => ide.GetEditorText());
+                Check($"writing window A leaves B in front and unchanged (A: {aAfter.Trim()}, active: {bText.Trim()})",
+                    aAfter.Contains("'A2'") && now.EditorHandle == b.EditorHandle && bText.Contains("'B'"));
+
+                // the tools with the request's window bound
+                var ctx = new ToolContext
+                {
+                    Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()),
+                    EditorBinding = new ToolContext.EditorWindowHolder { Value = target },
+                };
+                await Tool(ctx, "edit_editor", new JObject { ["old_string"] = "'A2'", ["new_string"] = "'A3'" }, "Editor updated (Sql window");
+                Check("edit_editor changed window A, B stays in front",
+                    (await Task.Run(() => ide.GetEditorText(target))).Contains("'A3'") && (await Task.Run(() => ide.GetContext())).EditorHandle == b.EditorHandle);
+                await Tool(ctx, "get_ide_context", new JObject(), "Window the user has active now");
+
+                // compile_plsql from the request's window while another window is in front
+                ide.NewWindow(IdeWindowType.Sql, "create or replace procedure pda_win_p is\nbegin\n  null;\nend;\n");
+                await Task.Delay(500);
+                ctx.BindEditorWindow(await Task.Run(() => ide.GetContext()));
+                ide.NewWindow(IdeWindowType.Sql, "select 'D' x from dual");
+                await Task.Delay(500);
+                await Tool(ctx, "compile_plsql", new JObject { ["from_editor"] = true }, "PROCEDURE SCOTT.PDA_WIN_P: compiled successfully");
+
+                // a closed window is reported, nothing else is changed
+                CloseAllWindows();
+                ctx.EditorBinding.Value = target;
+                await Tool(ctx, "get_editor_text", new JObject(), "is not open any more");
+
+                // a 4,000-line package: changed with edit_object_source (the model sends only the changed lines)
+                var body = new StringBuilder("create or replace package body pda_big is\n");
+                for (int i = 1; i <= 800; i++)
+                    body.Append($"  procedure p{i} is\n  begin\n    dbms_output.put_line('p{i}');\n  end p{i};\n\n");
+                body.Append("end pda_big;");
+                var spec = new StringBuilder("create or replace package pda_big is\n");
+                for (int i = 1; i <= 800; i++) spec.Append($"  procedure p{i};\n");
+                spec.Append("end pda_big;");
+                var r1 = await Task.Run(() => ide.Execute(spec.ToString()));
+                var r2 = await Task.Run(() => ide.Execute(body.ToString()));
+                var lines = (await Task.Run(() => ide.Query("select count(*) from user_source where name = 'PDA_BIG' and type = 'PACKAGE BODY'", 1))).Rows[0][0];
+                Line($"PDA_BIG created: spec {r1.Ok}, body {r2.Ok}, {lines} body lines, {body.Length:N0} characters");
+
+                // Program windows (an object opened for editing) changed in the background, for a small and the large unit
+                await Task.Run(() => ide.Execute("create or replace procedure pda_win_p2 is\nbegin\n  null;\nend;"));
+                foreach (var (type, name) in new[] { ("PROCEDURE", "PDA_WIN_P2"), ("PACKAGE BODY", "PDA_BIG") })
+                {
+                    CloseAllWindows();
+                    ide.ObjectAction("EDIT", type, "SCOTT", name);
+                    await Task.Delay(1500);
+                    var prog = await Task.Run(() => ide.GetContext());
+                    var progTarget = EditorTarget.From(prog);
+                    ide.NewWindow(IdeWindowType.Sql, "select 'front' x from dual");
+                    await Task.Delay(700);
+                    var front = await Task.Run(() => ide.GetContext());
+                    Line($"{type} {name}: program window {prog.WindowName} ({prog.EditorHandle}), in front: {front.WindowName} ({front.EditorHandle}); windows: {WindowList()}; MDI front: {MdiFront()}");
+                    var ptext = await Task.Run(() => ide.GetEditorText(progTarget));
+                    var marker = ptext.Contains("dbms_output.put_line('p3');") ? "dbms_output.put_line('p3');" : "null;";
+                    await Task.Run(() => ide.ReplaceEditorText(ptext, ptext.Replace(marker, marker + " -- bg edit"), progTarget));
+                    await Task.Delay(700);
+                    var after = await Task.Run(() => ide.GetContext());
+                    var mdiAfter = MdiFront();
+                    Line($"after the edit: selected/top {after.WindowName} ({after.EditorHandle}); windows: {WindowList()}; MDI front: {mdiAfter}");
+                    Check($"the {type} window is changed in the background and the SQL window stays in front",
+                        (await Task.Run(() => ide.GetEditorText(progTarget))).Contains("-- bg edit") && after.EditorHandle == front.EditorHandle && mdiAfter.Contains("Sql"));
+                }
+                CloseAllWindows();
+                var sw = Stopwatch.StartNew();
+                await Tool(ctx, "edit_object_source", new JObject
+                {
+                    ["name"] = "PDA_BIG",
+                    ["edits"] = new JArray(new JObject { ["old_string"] = "    dbms_output.put_line('p777');", ["new_string"] = "    dbms_output.put_line('p777 changed');" }),
+                }, "PACKAGE BODY SCOTT.PDA_BIG: compiled successfully");
+                Line($"edit_object_source on {lines} lines: {sw.ElapsedMilliseconds} ms");
+                var check = await Task.Run(() => ide.Query("select (select status from user_objects where object_name = 'PDA_BIG' and object_type = 'PACKAGE BODY'), " +
+                    "(select count(*) from user_source where name = 'PDA_BIG' and type = 'PACKAGE BODY' and text like '%p777 changed%'), " +
+                    "(select count(*) from user_source where name = 'PDA_BIG' and type = 'PACKAGE BODY') from dual", 1));
+                var row = check.Rows[0];
+                Check($"the 4,000-line body is changed in one line and valid ({string.Join(" | ", row)})", row[0] == "VALID" && row[1] == "1" && row[2] == lines);
+                await Tool(ctx, "edit_object_source", new JObject
+                {
+                    ["name"] = "PDA_BIG",
+                    ["edits"] = new JArray(new JObject { ["old_string"] = "  procedure p12;", ["new_string"] = "  procedure p12; -- spec edit" }),
+                }, "PACKAGE SCOTT.PDA_BIG: compiled successfully");
+                await Tool(ctx, "edit_object_source", new JObject
+                {
+                    ["name"] = "PDA_BIG",
+                    ["edits"] = new JArray(new JObject { ["old_string"] = "no such text", ["new_string"] = "x" }),
+                }, "old_string was not found");
+                await Task.Run(() => ide.Execute("drop package pda_big"));
+                await Task.Run(() => ide.Execute("drop procedure pda_win_p"));
+                await Task.Run(() => ide.Execute("drop procedure pda_win_p2"));
+                Line($"\n**{_pass} passed, {_fail} failed**");
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
+        }
+
+        /// <summary>
+        /// The real model with a 4,000-line package: it must change one procedure without sending the whole package
+        /// (edit_object_source, or edit_editor + compile_plsql from_editor), and keep editing its window while another
+        /// window is opened in front during the request.
+        /// </summary>
+        private static async Task BigUnitLlmRunAsync(Plugin plugin)
+        {
+            var ide = plugin.Ide;
+            try
+            {
+                Line("# PL/Pilot – large package with the real model");
+                CloseAllWindows();
+                var body = new StringBuilder("create or replace package body pda_big is\n");
+                for (int i = 1; i <= 800; i++)
+                    body.Append($"  procedure p{i} is\n  begin\n    dbms_output.put_line('p{i}');\n  end p{i};\n\n");
+                body.Append("end pda_big;");
+                var spec = new StringBuilder("create or replace package pda_big is\n");
+                for (int i = 1; i <= 800; i++) spec.Append($"  procedure p{i};\n");
+                spec.Append("end pda_big;");
+                await Task.Run(() => ide.Execute(spec.ToString()));
+                await Task.Run(() => ide.Execute(body.ToString()));
+
+                plugin.OnMenuClick(Bootstrap.MiChat);
+                var chat = plugin.ChatWindow;
+                for (int i = 0; i < 150 && !chat.IsChatReady; i++) await Task.Delay(200);
+                UseTestModel(chat);
+                await chat.ExecuteScriptAsync(CarefulApprover());
+                async Task<string> Run(string prompt, Func<Task> during = null)
+                {
+                    Line("\nPrompt: " + prompt);
+                    await chat.ExecuteScriptAsync("document.getElementById('input').value = " + JsonConvert.SerializeObject(prompt) + "; submit();");
+                    var sw = Stopwatch.StartNew();
+                    bool sawBusy = false, done = false;
+                    while (sw.Elapsed < TimeSpan.FromMinutes(15))
+                    {
+                        await Task.Delay(1000);
+                        if (chat.IsBusy) sawBusy = true;
+                        else if (sawBusy || sw.Elapsed > TimeSpan.FromSeconds(30)) break;
+                        if (sawBusy && !done && during != null && sw.Elapsed > TimeSpan.FromSeconds(4)) { done = true; await during(); }
+                    }
+                    if (chat.IsBusy) { Line("(still working after 15 minutes: stopped)"); chat.StopForTest(); for (int i = 0; i < 60 && chat.IsBusy; i++) await Task.Delay(500); }
+                    var transcript = JsonConvert.DeserializeObject<string>(await chat.ExecuteScriptAsync("document.getElementById('messages').innerText") ?? "\"\"") ?? "";
+                    Line($"Finished after {sw.Elapsed.TotalSeconds:0} s");
+                    return transcript;
+                }
+
+                // 1. a stored 4,000-line body
+                var t1 = await Run("In the package body PDA_BIG (about 4,000 lines), change procedure p777 so that it prints 'p777 v2' instead of 'p777'. Compile it.");
+                File.WriteAllText(Path.Combine(_dir, "transcript-1.txt"), t1, Encoding.UTF8);
+                var row = (await Task.Run(() => ide.Query("select (select status from user_objects where object_name = 'PDA_BIG' and object_type = 'PACKAGE BODY'), " +
+                    "(select count(*) from user_source where name = 'PDA_BIG' and type = 'PACKAGE BODY' and text like '%p777 v2%'), " +
+                    "(select count(*) from user_source where name = 'PDA_BIG' and type = 'PACKAGE BODY') from dual", 1))).Rows[0];
+                Line($"Tools used: {ToolNames(t1)}; body {row[0]}, changed lines {row[1]}, {row[2]} lines");
+                Check("the model changed one procedure of the 4,000-line body without sending it whole", row[0] == "VALID" && row[1] == "1" && int.Parse(row[2]) >= 4000 &&
+                    (t1.Contains("edit_object_source") || t1.Contains(L.T("text of the editor window"))) && !t1.Contains(L.T("cut off at the output limit")));
+                // the approval of an existing unit shows a diff, not the whole 4,000 lines
+                Check("the compile approval shows a diff against the database, not the whole unit", !t1.Contains("procedure p13 is") || t1.Contains("edit_object_source"));
+
+                // 2. the open program window, while the user opens another window in front during the request
+                await NewChatForTest(chat);
+                CloseAllWindows();
+                await Task.Run(() => ide.ObjectAction("EDIT", "PACKAGE BODY", "SCOTT", "PDA_BIG"));
+                await Task.Delay(1500);
+                var program = await Task.Run(() => ide.GetContext());
+                var target = EditorTarget.From(program);
+                Line($"Opened: {program.WindowName} ({program.EditorHandle}); windows: {WindowList()}");
+                var t2 = await Run("In this editor window add the comment line '-- checked by PL/Pilot' directly after the 'begin' of procedure p3. Only change the editor text, do not compile.",
+                    async () =>
+                    {
+                        ide.NewWindow(IdeWindowType.Sql, "select 'user window' x from dual");
+                        Line($"(the user opened another SQL window in front) windows: {WindowList()}; MDI front: {MdiFront()}");
+                        await Task.Delay(100);
+                    });
+                File.WriteAllText(Path.Combine(_dir, "transcript-2.txt"), t2, Encoding.UTF8);
+                var programText = await Task.Run(() => { try { return ide.GetEditorText(target); } catch (Exception ex) { return "ERROR " + ex.Message; } });
+                var active = await Task.Run(() => ide.GetContext());
+                var activeText = await Task.Run(() => ide.GetEditorText());
+                Line($"Tools used: {ToolNames(t2)}; active now: {active.WindowName} ({active.EditorHandle}); windows: {WindowList()}; MDI front: {MdiFront()}");
+                Check("the model edited its program window while another window was in front, which stayed unchanged",
+                    programText.Contains("-- checked by PL/Pilot") && activeText.Contains("'user window'") && !activeText.Contains("checked by"));
+                await Task.Run(() => ide.Execute("drop package pda_big"));
+                Line($"\n**{_pass} passed, {_fail} failed**");
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
+        }
+
+        /// <summary>"0: Sql 68118 | 1: Program PDA_BIG 68208" – the IDE's window list as IDE_SelectWindow sees it.</summary>
+        private static string WindowList() => MainThread.Invoke(() =>
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            int count = Callbacks.IDE_GetWindowCount();
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    if (Callbacks.IDE_SelectWindow(i) == 0) continue;
+                    var name = Callbacks.IDE_GetWindowObject(out _, out _, out var n, out _) != 0 ? " " + Marshal.PtrToStringAnsi(n) : "";
+                    parts.Add($"{i}: {(IdeWindowType)Callbacks.IDE_GetWindowType()}{name} {Callbacks.IDE_GetEditorHandle()}");
+                }
+            }
+            finally { Callbacks.IDE_SelectWindow(0); }
+            return string.Join(" | ", parts);
+        });
+
+        /// <summary>The MDI child Windows shows in front (WM_MDIGETACTIVE), with the editor control it contains.</summary>
+        private static string MdiFront() => MainThread.Invoke(() =>
+        {
+            var main = new IntPtr(Callbacks.IDE_GetWindowHandle());
+            var client = FindWindowEx(main, IntPtr.Zero, "MDIClient", null);
+            if (client == IntPtr.Zero) return "(no MDIClient)";
+            var child = SendMessage(client, 0x0229 /* WM_MDIGETACTIVE */, IntPtr.Zero, IntPtr.Zero);
+            var title = new StringBuilder(256);
+            GetWindowText(child, title, 256);
+            // which window of the IDE's list owns that child: compare editor controls
+            int count = Callbacks.IDE_GetWindowCount();
+            string owner = "?";
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    if (Callbacks.IDE_SelectWindow(i) == 0) continue;
+                    var editor = new IntPtr(Callbacks.IDE_GetEditorHandle());
+                    if (editor != IntPtr.Zero && IsChild(child, editor)) { owner = $"{i}: {(IdeWindowType)Callbacks.IDE_GetWindowType()} {editor}"; break; }
+                }
+            }
+            finally { Callbacks.IDE_SelectWindow(0); }
+            return $"'{title}' = {owner}";
+        });
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+        [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int max);
+        [DllImport("user32.dll")] private static extern bool IsChild(IntPtr parent, IntPtr child);
+
+        /// <summary>
+        /// Setting "No parallel execution": the agent's own session is switched to serial (v$session pq/pdml/pddl status),
+        /// rewritten statements run in Oracle, the executed text carries NO_PARALLEL, switching parallel on is refused,
+        /// and turning the setting off restores Oracle's defaults. (Oracle Free has no parallel servers, so actual PX
+        /// cannot be observed here; Free sessions also start with parallel query disabled, so it is enabled first.)
+        /// </summary>
+        private static async Task ParallelRunAsync(Plugin plugin)
+        {
+            var ide = plugin.Ide;
+            try
+            {
+                Line("# PL/Pilot – no parallel execution");
+                if (!(ide is PlsqlIde pi)) { Line("FATAL: not the real IDE"); return; }
+                var cfg = AgentConfig.Load();
+                cfg.DisableParallel = true;
+                var ctx = new ToolContext { Ide = ide, Config = cfg, RequestApproval = r => Task.FromResult(ApprovalResult.Yes()) };
+                Task<string> Status() => Task.Run(() => ide.Query("select pq_status || ' ' || pdml_status || ' ' || pddl_status from v$session where sid = sys_context('userenv','sid')", 1).Rows[0][0]);
+
+                pi.DisableParallel = false;
+                await Task.Run(() => ide.Execute("alter session enable parallel query"));
+                var before = await Status();
+                pi.DisableParallel = true;
+                var after = await Status();
+                Line($"Separate session: {ide.UsesOwnSession}; session status before: {before}, with the setting: {after}");
+                bool canParallel = before.StartsWith("ENABLED");
+                var log = File.ReadAllText(Log.FilePath);
+                log = log.Substring(Math.Max(0, log.Length - 20000));
+                if (canParallel)
+                    Check($"the setting switches the agent's session to serial ({before} -> {after})", after == "DISABLED DISABLED DISABLED");
+                else
+                    Check("this database does not allow parallel query in sessions (Oracle Free); the ALTER SESSION statements ran without error",
+                        log.Contains("Agent session: parallel execution disabled") && !log.Contains("disable parallel query failed"));
+
+                var run = Guid.NewGuid().ToString("N").Substring(0, 6);
+                await Tool(ctx, "run_query", new JObject { ["sql"] = $"select /*+ parallel(4) full(e) */ count(*) pda_px_n{run} from emp e" }, "PDA_PX_N");
+                await Tool(ctx, "run_query", new JObject { ["sql"] = $"with d as (select /*+ parallel */ deptno from dept) select count(*) pda_px_w{run} from d" }, "PDA_PX_W");
+                await Tool(ctx, "measure_sql", new JObject { ["sql"] = $"select /*+ parallel(2) */ count(*) pda_px_m{run} from emp" }, "PDA_PX_M");
+                await Tool(ctx, "explain_plan", new JObject { ["sql"] = $"select /*+ parallel(2) */ count(*) pda_px_e{run} from emp" }, "Plan hash value");
+                var texts = await Task.Run(() => ide.Query($"select sql_text from v$sql where lower(sql_text) like '%pda_px__{run}%' " +
+                    "and sql_text not like '%v$sql%' order by last_active_time desc", 20));
+                var all = texts.Rows.Select(r => r[0]).ToList();
+                Line("Executed statements:\n```\n" + string.Join("\n", all) + "\n```");
+                Check("Oracle ran the rewritten statements, each with NO_PARALLEL and without its PARALLEL hint",
+                    all.Count >= 3 && all.All(t => t.Contains("NO_PARALLEL") && !System.Text.RegularExpressions.Regex.IsMatch(t, @"(?<!NO_)PARALLEL\s*\(|/\*\+\s*PARALLEL\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)));
+
+                await Tool(ctx, "execute_sql", new JObject { ["sql"] = "alter session enable parallel query" }, "parallel execution is switched off");
+                Check("the session stays serial", (await Status()) == "DISABLED DISABLED DISABLED");
+
+                pi.DisableParallel = false;
+                var off = await Status();
+                if (canParallel) Check($"turning the setting off restores Oracle's defaults ({off})", off == "ENABLED DISABLED ENABLED");
+                else Line($"Setting off: {off} (Oracle Free keeps parallel query disabled)");
+                Line($"\n**{_pass} passed, {_fail} failed**");
+            }
+            catch (Exception ex) { Line("FATAL: " + ex); }
+            finally
+            {
+                File.WriteAllText(Path.Combine(_dir, "report.md"), Report.ToString(), Encoding.UTF8);
+                await CloseIde();
+            }
+        }
+
+        /// <summary>The tool names that appear in a chat transcript (tool call lines), in order.</summary>
+        private static string ToolNames(string transcript) =>
+            string.Join(", ", ToolRegistry.All().Select(t => t.Name).Where(n => transcript.Contains(n)));
+
+        private static async Task NewChatForTest(ChatForm chat)
+        {
+            await chat.ExecuteScriptAsync("document.getElementById('input').value = '/new'; submit();");
+            await Task.Delay(1500);
+        }
+
+        /// <summary>Posts a work item to the main thread every 50 ms and records how long it waited to run.</summary>
+        private sealed class MainThreadProbe : IDisposable
+        {
+            private readonly System.Collections.Generic.List<(DateTime at, long ms)> _samples = new System.Collections.Generic.List<(DateTime, long)>();
+            private readonly System.Collections.Generic.List<(DateTime at, long ms)> _all = new System.Collections.Generic.List<(DateTime, long)>();
+            private volatile bool _stop;
+            private readonly System.Threading.Thread _thread;
+
+            public MainThreadProbe()
+            {
+                _thread = new System.Threading.Thread(Loop) { IsBackground = true, Name = "main thread probe" };
+                _thread.Start();
+            }
+
+            private void Loop()
+            {
+                while (!_stop)
+                {
+                    var sw = Stopwatch.StartNew();
+                    using (var done = new System.Threading.ManualResetEventSlim(false))
+                    {
+                        MainThread.Post(() => done.Set());
+                        done.Wait(120000);
+                    }
+                    var sample = (DateTime.Now, sw.ElapsedMilliseconds);
+                    lock (_samples) { _samples.Add(sample); _all.Add(sample); }
+                    System.Threading.Thread.Sleep(50);
+                }
+            }
+
+            public void Reset() { lock (_samples) _samples.Clear(); }
+
+            public (int Count, long Max, int Over250) Snapshot()
+            {
+                lock (_samples)
+                    return (_samples.Count, _samples.Count == 0 ? 0 : _samples.Max(s => s.ms), _samples.Count(s => s.ms > 250));
+            }
+
+            public System.Collections.Generic.IEnumerable<string> Worst(int n)
+            {
+                lock (_samples) return _all.OrderByDescending(s => s.ms).Take(n).Select(s => $"{s.ms} ms at {s.at:HH:mm:ss}").ToList();
+            }
+
+            public void Dispose() => _stop = true;
         }
 
         private static void Check(string name, bool ok)

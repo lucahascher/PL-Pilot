@@ -453,6 +453,7 @@ footer { padding: 6px 16px 12px; position: relative; flex: none; }
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Read-only Mode</div><label><input type="checkbox" id="ReadOnlyMode"><span class="s-desc">The agent cannot change the editor, the database or files on any connection.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Separate Session</div><label><input type="checkbox" id="SeparateSession"><span class="s-desc">Use a separate database session for the agent, so it does not touch your transaction.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Use DBA Views</div><label><input type="checkbox" id="UseDbaViews"><span class="s-desc">All queries of the agent use the DBA_ dictionary views instead of the ALL_ views (ALL_TABLES becomes DBA_TABLES, also in the queries the model writes). Needs SELECT_CATALOG_ROLE; without it the ALL_ views are used.</span></label></div>
+    <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>No Parallel Execution</div><label><input type="checkbox" id="DisableParallel"><span class="s-desc">The agent's SQL runs serially, so it does not take parallel execution servers (CPU cores) of the database: its own session gets ALTER SESSION DISABLE PARALLEL QUERY / DML / DDL, every query and DML statement a NO_PARALLEL hint, and PARALLEL hints are removed.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Auto Approve Editor Edits</div><label><input type="checkbox" id="AutoApproveEditorEdits"><span class="s-desc">Apply editor edits without asking.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Auto Approve SQL</div><label><input type="checkbox" id="AutoApproveSql"><span class="s-desc">Execute SQL and compile without asking. DROP, DELETE and TRUNCATE always ask.</span></label></div>
     <div class="setting check"><div class="s-title"><span class="s-cat">Safety: </span>Auto Approve File Writes</div><label><input type="checkbox" id="AutoApproveFileWrites"><span class="s-desc">Write files without asking.</span></label></div>
@@ -645,6 +646,8 @@ const DE = {
   'Read-only Mode': 'Nur-Lesen-Modus', 'The agent cannot change the editor, the database or files on any connection.': 'Der Agent kann auf keiner Verbindung den Editor, die Datenbank oder Dateien ändern.',
   'Use DBA Views': 'DBA-Views verwenden', 'All queries of the agent use the DBA_ dictionary views instead of the ALL_ views (ALL_TABLES becomes DBA_TABLES, also in the queries the model writes). Needs SELECT_CATALOG_ROLE; without it the ALL_ views are used.':
     'Alle Abfragen des Agenten verwenden die DBA_-Dictionary-Views statt der ALL_-Views (aus ALL_TABLES wird DBA_TABLES, auch in den Abfragen des Modells). Benötigt SELECT_CATALOG_ROLE; ohne sie werden die ALL_-Views verwendet.',
+  'No Parallel Execution': 'Keine parallele Ausführung', 'The agent\'s SQL runs serially, so it does not take parallel execution servers (CPU cores) of the database: its own session gets ALTER SESSION DISABLE PARALLEL QUERY / DML / DDL, every query and DML statement a NO_PARALLEL hint, and PARALLEL hints are removed.':
+    'Das SQL des Agenten läuft seriell und belegt keine Parallel-Server (CPU-Kerne) der Datenbank: Seine eigene Sitzung erhält ALTER SESSION DISABLE PARALLEL QUERY / DML / DDL, jede Abfrage und DML-Anweisung einen NO_PARALLEL-Hint, und PARALLEL-Hints werden entfernt.',
   'Rewind: undo the changes made since this message': 'Zurückspulen: die Änderungen seit dieser Nachricht rückgängig machen',
   'Rewind to before this message': 'Zurück zum Stand vor dieser Nachricht', 'Undo this step and everything after it': 'Diesen Schritt und alles danach rückgängig machen',
   'No undo information for this point: it is kept only until PL/SQL Developer is closed.': 'Für diese Stelle gibt es keine Rückgängig-Informationen mehr: Sie werden nur bis zum Schließen von PL/SQL Developer aufbewahrt.',
@@ -962,10 +965,16 @@ function showRun() {
     : t('Working');
   const tokens = run.chars > 0 ? ' · ~' + fmtTokens(Math.round(run.chars / 3.5)) + ' ' + t('tokens') : '';
   const detail = run.act === 'think' ? run.thought : run.act === 'tool' ? run.sub : '';
-  $('hint').innerHTML = '<span class="spinner"></span><span class="act">' + esc(label) + ' (' + fmtSecs(now - run.actStart) + ')</span>' +
-    '<span class="thought">' + esc(detail || '') + '</span>' +
-    '<span class="totals">' + esc(t('step {0}', run.steps) + ' · ' + fmtSecs(now - run.start) + tokens + ' · ' + t('Esc to stop')) + '</span>';
+  // the elements are created once per request and only their texts change: re-creating the spinner on every
+  // update (each streamed chunk, each second) restarted its animation, so it jumped instead of turning
+  const hint = $('hint');
+  if (!hint.querySelector('.spinner'))
+    hint.innerHTML = '<span class="spinner"></span><span class="act"></span><span class="thought"></span><span class="totals"></span>';
+  setText(hint.querySelector('.act'), label + ' (' + fmtSecs(now - run.actStart) + ')');
+  setText(hint.querySelector('.thought'), detail || '');
+  setText(hint.querySelector('.totals'), t('step {0}', run.steps) + ' · ' + fmtSecs(now - run.start) + tokens + ' · ' + t('Esc to stop'));
 }
+function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
 function startRun() {
   run = { start: Date.now(), act: 'model', actStart: Date.now(), detail: '', sub: '', steps: 0, tools: 0, chars: 0, thought: '', thoughtBuf: '' };
   clearInterval(runTimer);
@@ -1663,7 +1672,7 @@ const FIELDS = ['BaseUrl', 'ApiKey', 'Model', 'Temperature', 'MaxTokens', 'Conte
   'UseSystemProxy', 'TrustedCertificates', 'RequestUsage', 'WorkspaceDir', 'ExtraInstructions', 'CompanyRulesPath', 'McpConfigPath', 'CustomCommands', 'MaxSteps', 'AutoContinue', 'MaxAutoContinues', 'SubtaskMaxSteps', 'SubtaskModel',
   'MaxQueryRows', 'ConfirmSlowQuerySeconds', 'CompilerWarnings', 'MentionSuggestions', 'ProtectedConnections', 'BackupBeforeChanges',
   'SaveChatHistory', 'ChatHistoryContent', 'ChatRetentionDays', 'BackupRetentionDays', 'LogRetentionDays',
-  'ReadOnlyMode', 'SeparateSession', 'UseDbaViews', 'AutoApproveEditorEdits', 'AutoApproveSql', 'AutoApproveFileWrites', 'DevTools', 'Theme', 'Language'];
+  'ReadOnlyMode', 'SeparateSession', 'UseDbaViews', 'DisableParallel', 'AutoApproveEditorEdits', 'AutoApproveSql', 'AutoApproveFileWrites', 'DevTools', 'Theme', 'Language'];
 let settingsBase = {};
 function openSettings(cfg) {
   settingsBase = cfg || {};

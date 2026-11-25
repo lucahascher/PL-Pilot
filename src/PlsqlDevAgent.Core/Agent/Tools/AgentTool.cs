@@ -105,21 +105,49 @@ namespace PlsqlDevAgent.Agent.Tools
     {
         private IIde _ide;
         private DbaViewsIde _dbaIde;
+        private SerialSqlIde _serialIde;
 
         /// <summary>
         /// The IDE for tools. With the setting "Use DBA views" its queries read the DBA_ dictionary views instead of
-        /// the ALL_ views (this covers the plug-in's own lookups and the model's queries alike).
+        /// the ALL_ views (this covers the plug-in's own lookups and the model's queries alike); with "No parallel
+        /// execution" every query and DML statement runs serially (NO_PARALLEL, PARALLEL hints removed).
         /// </summary>
         public IIde Ide
         {
             get
             {
-                if (_ide == null || Config == null || !Config.UseDbaViews) return _ide;
-                if (_dbaIde == null || !_dbaIde.Wraps(_ide)) _dbaIde = new DbaViewsIde(_ide);
-                return _dbaIde;
+                if (_ide == null || Config == null) return _ide;
+                var ide = _ide;
+                if (Config.UseDbaViews)
+                {
+                    if (_dbaIde == null || !_dbaIde.Wraps(ide)) _dbaIde = new DbaViewsIde(ide);
+                    ide = _dbaIde;
+                }
+                if (Config.DisableParallel)
+                {
+                    if (_serialIde == null || !_serialIde.Wraps(ide)) _serialIde = new SerialSqlIde(ide);
+                    ide = _serialIde;
+                }
+                return ide;
             }
             set => _ide = value;
         }
+
+        /// <summary>The DBA views decorator of <see cref="Ide"/> (setting "Use DBA views"), or null.</summary>
+        internal DbaViewsIde DbaViewsIde
+        {
+            get
+            {
+                var _ = Ide; // creates it when needed
+                return Config != null && Config.UseDbaViews ? _dbaIde : null;
+            }
+        }
+
+        /// <summary>
+        /// Setting "No parallel execution": the statement as the agent runs it (NO_PARALLEL, without PARALLEL hints). For SQL
+        /// that tools embed in PL/SQL blocks or EXPLAIN PLAN, which the decorator does not rewrite.
+        /// </summary>
+        public string Serial(string sql) => Config != null && Config.DisableParallel ? SerialSql.Rewrite(sql) : sql;
 
         public AgentConfig Config;
         public CancellationToken Cancellation;
@@ -284,6 +312,43 @@ namespace PlsqlDevAgent.Agent.Tools
         /// <summary>The user excluded this window from the chat (crossed out above the input); null: nothing is excluded.</summary>
         public Func<IdeContext, bool> WindowExcluded;
 
+        /// <summary>The editor window of the current request; shared by the copies of the context (see <see cref="EditorWindow"/>).</summary>
+        public sealed class EditorWindowHolder { public volatile EditorTarget Value; }
+        public EditorWindowHolder EditorBinding;
+
+        /// <summary>
+        /// The editor window this request works on: the window that was active when the user sent it, or the one the agent
+        /// opened since. The editor tools use it even when the user activates another window meanwhile. If no editor
+        /// window was active at the start, the first editor tool binds the window that is active then.
+        /// Null: no binding (e.g. tests without a session) – the tools then use the active window.
+        /// </summary>
+        public EditorTarget EditorWindow
+        {
+            get
+            {
+                var holder = EditorBinding;
+                if (holder == null) return null;
+                var bound = holder.Value;
+                if (bound != null) return bound;
+                bound = EditorTarget.From(Ide.GetContext());
+                if (bound != null) holder.Value = bound;
+                return bound;
+            }
+        }
+
+        /// <summary>The editor tools work on this window from now on (e.g. a window the agent just opened).</summary>
+        public void BindEditorWindow(IdeContext window)
+        {
+            if (EditorBinding != null) EditorBinding.Value = EditorTarget.From(window);
+        }
+
+        /// <summary>State of <see cref="EditorWindow"/> (throws <see cref="IdeException"/> if the user closed it).</summary>
+        public IdeContext EditorContext(out EditorTarget window)
+        {
+            window = EditorWindow;
+            return Ide.GetWindowContext(window);
+        }
+
         /// <summary>
         /// Why the active editor window must not be read or changed now (the user excluded it from the chat), or null.
         /// Checked by the tools that read or change the active window.
@@ -403,6 +468,7 @@ namespace PlsqlDevAgent.Agent.Tools
             new ListBackupsTool(),
             // Database (write)
             new CompilePlsqlTool(),
+            new EditObjectSourceTool(),
             new ExecuteSqlTool(),
             new RecompileInvalidTool(),
             new RunUnitTestsTool(),

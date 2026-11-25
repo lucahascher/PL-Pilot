@@ -84,7 +84,12 @@ namespace PlsqlDevAgent.Ide
             catch { return false; }
         }
 
-        public IdeContext GetContext() => MainThread.Invoke(() =>
+        public IdeContext GetContext() => MainThread.Invoke(ReadContext);
+
+        public IdeContext GetWindowContext(EditorTarget window) => OnWindow(window, ReadContext);
+
+        /// <summary>State of the window the plug-in functions point to (the active one unless IDE_SelectWindow chose another).</summary>
+        private static IdeContext ReadContext()
         {
             var ctx = new IdeContext
             {
@@ -110,6 +115,7 @@ namespace PlsqlDevAgent.Ide
                 {
                     ctx.CursorLine = IDE_GetCursorY?.Invoke() ?? 0;
                     ctx.CursorColumn = IDE_GetCursorX?.Invoke() ?? 0;
+                    ctx.EditorHandle = IDE_GetEditorHandle?.Invoke() ?? 0;
                 }
                 if (IDE_GetWindowObject != null && IDE_GetWindowObject(out var t, out var o, out var n, out _) != 0)
                 {
@@ -119,28 +125,66 @@ namespace PlsqlDevAgent.Ide
                 }
             }
             return ctx;
-        });
+        }
 
-        public string GetEditorText() => MainThread.Invoke(() =>
+        /// <summary>
+        /// Runs <paramref name="body"/> on the main thread with the plug-in functions pointed at the editor window
+        /// <paramref name="window"/> (IDE_SelectWindow; null: the active window). The window is not brought to the front,
+        /// so the user can keep working in another window while the agent reads or changes this one.
+        /// </summary>
+        private static T OnWindow<T>(EditorTarget window, Func<T> body) => MainThread.Invoke(() =>
+        {
+            if (window == null) return body();
+            if (IDE_GetWindowCount == null || IDE_SelectWindow == null)
+            {
+                // very old versions: only the active window can be reached
+                if (window.Matches(ReadContext())) return body();
+                throw new IdeException($"The {window.Name} is not the active window any more, and this PL/SQL Developer version cannot reach other windows. Ask the user to activate it again.");
+            }
+            int count = IDE_GetWindowCount(), found = -1;
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    if (IDE_SelectWindow(i) == 0) continue;
+                    var c = ReadContext();
+                    if (!window.Matches(c)) continue;
+                    if (found < 0) found = i;
+                    if (window.IsSameControl(c)) { found = i; break; } // exactly the window the request started with
+                }
+                if (found < 0)
+                    throw new IdeException($"The {window.Name} is not open any more (it was closed). Open it again (open_object or open_file_in_ide) or ask the user.");
+                IDE_SelectWindow(found);
+                return body();
+            }
+            finally
+            {
+                IDE_SelectWindow(0); // back to the active window
+            }
+        }, label: "editor window " + window?.Name);
+
+        public string GetEditorText(EditorTarget window = null) => OnWindow(window, () =>
         {
             RequireEditor();
             return Str(IDE_GetText());
         });
 
-        public string GetSelectedText() => MainThread.Invoke(() =>
+        public string GetSelectedText(EditorTarget window = null) => OnWindow(window, () =>
         {
             if ((IDE_GetWindowType?.Invoke() ?? 0) == 0) return "";
             return Str(IDE_GetSelectedText());
         });
 
-        public void ReplaceEditorText(string expectedCurrent, string newText) => MainThread.Invoke(() =>
+        public void ReplaceEditorText(string expectedCurrent, string newText, EditorTarget window = null) => OnWindow<object>(window, () =>
         {
             RequireEditor();
             var current = Str(IDE_GetText());
             if (expectedCurrent != null && Normalize(current) != Normalize(expectedCurrent))
-                throw new IdeException("The editor content changed since it was read (did the user edit it or switch windows?). Read it again and retry.");
+                throw new IdeException(window == null
+                    ? "The editor content changed since it was read (did the user edit it or switch windows?). Read it again and retry."
+                    : $"The text in the {window.Name} changed since it was read (the user edited it). Read it again and retry.");
             if (IDE_GetReadOnly?.Invoke() != 0)
-                throw new IdeException("The active editor is read-only.");
+                throw new IdeException(window == null ? "The active editor is read-only." : $"The {window.Name} is read-only.");
 
             // The plug-in interface only transfers the Windows ANSI code page. If the editor already contains
             // other characters, they were read as '?' and writing the text back would destroy them.
@@ -157,6 +201,7 @@ namespace PlsqlDevAgent.Ide
                 if (IDE_SetText(s.Ptr) == 0) throw new IdeException("PL/SQL Developer refused to set the editor text.");
             }
             if (x > 0 && y > 0) IDE_SetCursor?.Invoke(x, y);
+            return null;
         });
 
         public void NewWindow(IdeWindowType type, string text) => MainThread.Invoke(() =>
@@ -303,7 +348,7 @@ namespace PlsqlDevAgent.Ide
         /// follow; column 0 is an indicator column, column 1 the row number and there are filler columns without a
         /// title at the end. Only columns with a title are returned; the last data row may be at index RowCount.
         /// </summary>
-        public QueryResult GetResultGrid(int maxRows) => MainThread.Invoke(() =>
+        public QueryResult GetResultGrid(int maxRows, EditorTarget window = null) => OnWindow(window, () =>
         {
             var result = new QueryResult();
             if (IDE_ResultGridRowCount == null || IDE_ResultGridCell == null) throw new IdeException("This PL/SQL Developer version does not expose the result grid.");
@@ -498,10 +543,37 @@ namespace PlsqlDevAgent.Ide
                     using (var s = new NativeString("begin dbms_output.enable(null); end;")) SQL_Execute(s.Ptr);
                     _outputEnabled = true;
                 }
+                // only the agent's own session: PL/SQL Developer's main session is the user's
+                if (_ownSession && (DisableParallel ? _parallelDisabled != true : _parallelDisabled == true)) ApplyParallelSetting(DisableParallel);
                 return body();
             }
 
-            return _ownSession ? SqlThread.Run(OneLine(sql), Run, ct, SqlTimeout) : MainThread.Invoke(Run);
+            return _ownSession ? SqlThread.Run(OneLine(sql), Run, ct, SqlTimeout) : MainThread.Invoke(Run, label: "SQL in PL/SQL Developer's main session: " + OneLine(sql));
+        }
+
+        /// <summary>
+        /// Setting "No parallel execution": the agent's own session runs without parallel execution servers. Changed in the
+        /// session before its next statement.
+        /// </summary>
+        public bool DisableParallel { get; set; }
+
+        /// <summary>The parallel mode set in the current session (null: untouched, Oracle's defaults).</summary>
+        private bool? _parallelDisabled;
+
+        /// <summary>Runs on the session's thread before a statement. Failures are logged, the statement still runs.</summary>
+        private void ApplyParallelSetting(bool disable)
+        {
+            // Oracle's defaults when switched back on: parallel query and DDL enabled, parallel DML disabled
+            var statements = disable
+                ? new[] { "alter session disable parallel query", "alter session disable parallel dml", "alter session disable parallel ddl" }
+                : new[] { "alter session enable parallel query", "alter session enable parallel ddl" };
+            foreach (var stmt in statements)
+            {
+                using (var s = new NativeString(stmt))
+                    if (SQL_Execute(s.Ptr) != 0) Util.Log.Warn($"{stmt} failed: {Str(SQL_ErrorMessage())}");
+            }
+            _parallelDisabled = disable;
+            Util.Log.Info(disable ? "Agent session: parallel execution disabled (setting No parallel execution)" : "Agent session: parallel execution enabled again");
         }
 
         private static string OneLine(string sql)
@@ -527,6 +599,7 @@ namespace PlsqlDevAgent.Ide
             }
             _ownSession = own;
             _outputEnabled = false;
+            _parallelDisabled = null; // a new session starts with Oracle's defaults
             _sessionReady = true;
         }
 

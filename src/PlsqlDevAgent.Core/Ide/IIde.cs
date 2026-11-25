@@ -11,11 +11,22 @@ namespace PlsqlDevAgent.Ide
     public interface IIde
     {
         IdeContext GetContext();
-        string GetEditorText();
-        string GetSelectedText();
 
-        /// <summary>Replaces the active editor's text if it still equals <paramref name="expectedCurrent"/>.</summary>
-        void ReplaceEditorText(string expectedCurrent, string newText);
+        /// <summary>
+        /// State of the editor window <paramref name="window"/> (null: the active window), also when the user has activated
+        /// another window meanwhile. Throws <see cref="IdeException"/> if that window was closed.
+        /// </summary>
+        IdeContext GetWindowContext(EditorTarget window);
+
+        /// <summary>Text of the editor window <paramref name="window"/> (null: the active window).</summary>
+        string GetEditorText(EditorTarget window = null);
+        string GetSelectedText(EditorTarget window = null);
+
+        /// <summary>
+        /// Replaces the text of the editor window <paramref name="window"/> (null: the active window) if it still equals
+        /// <paramref name="expectedCurrent"/>. The window is not brought to the front.
+        /// </summary>
+        void ReplaceEditorText(string expectedCurrent, string newText, EditorTarget window = null);
 
         void NewWindow(IdeWindowType type, string text);
 
@@ -30,8 +41,8 @@ namespace PlsqlDevAgent.Ide
 
         QueryResult Query(string sql, int maxRows);
 
-        /// <summary>Rows shown in the result grid of the active SQL/Test window.</summary>
-        QueryResult GetResultGrid(int maxRows);
+        /// <summary>Rows shown in the result grid of the SQL/Test window <paramref name="window"/> (null: the active window).</summary>
+        QueryResult GetResultGrid(int maxRows, EditorTarget window = null);
         ExecResult Execute(string sql);
 
         /// <summary>
@@ -102,6 +113,8 @@ namespace PlsqlDevAgent.Ide
         public string ObjectType, ObjectOwner, ObjectName;
         public int CursorLine, CursorColumn;
         public bool HasEditor, Modified, ReadOnly;
+        /// <summary>Window handle of the editor control (identifies the window while it is open); 0 if unknown.</summary>
+        public long EditorHandle;
 
         public string ConnectionLabel => Connected
             ? $"{User}@{Database}{(string.IsNullOrEmpty(ConnectAs) || ConnectAs == "Normal" ? "" : " as " + ConnectAs)}"
@@ -140,6 +153,18 @@ namespace PlsqlDevAgent.Ide
             }
         }
 
+        /// <summary>Short English name of the window for the model, e.g. "Program window for PACKAGE BODY SCOTT.EMP_API".</summary>
+        public string WindowName
+        {
+            get
+            {
+                if (WindowType == IdeWindowType.None) return "no editor window";
+                if (!string.IsNullOrEmpty(ObjectName)) return $"{WindowType} window for {ObjectType} {ObjectOwner}.{ObjectName}";
+                if (!string.IsNullOrEmpty(FileName)) return $"{WindowType} window for file {FileName}";
+                return $"{WindowType} window (unsaved, no file)";
+            }
+        }
+
         /// <summary>" in the Program window for PACKAGE BODY X.Y" – used when quoting a selection.</summary>
         public string LabelForPrompt()
         {
@@ -171,6 +196,44 @@ namespace PlsqlDevAgent.Ide
                 return sb.ToString();
             }
         }
+    }
+
+    /// <summary>
+    /// The editor window a request works on: the window that was active when the user sent it (or the one the agent
+    /// opened). The editor tools keep working on it when the user activates another window meanwhile. It is found again
+    /// by its editor control and, if that is gone (window closed and opened again), by the object or file it shows.
+    /// </summary>
+    public sealed class EditorTarget
+    {
+        public long EditorHandle;
+        /// <summary><see cref="IdeContext.WindowKey"/> when the window was chosen.</summary>
+        public string Key;
+        /// <summary>For the model, e.g. "Program window for PACKAGE BODY SCOTT.EMP_API" (English).</summary>
+        public string Name;
+        /// <summary>For the user, in the UI language.</summary>
+        public string NameUi;
+
+        /// <summary>The window shows a database object or a file: another window showing the same is just as good.</summary>
+        public bool HasIdentity => Key != null && !Key.EndsWith("||||", StringComparison.Ordinal);
+
+        public static EditorTarget From(IdeContext c) => c == null || !c.HasEditor || c.WindowKey == null ? null : new EditorTarget
+        {
+            EditorHandle = c.EditorHandle,
+            Key = c.WindowKey,
+            Name = c.WindowName,
+            NameUi = c.WindowNameUi,
+        };
+
+        /// <summary>
+        /// The context describes this window: a window with an object or file must still show it (the same editor control
+        /// is preferred, see <see cref="IsSameControl"/>); an unsaved window without one is recognized by its editor control.
+        /// </summary>
+        public bool Matches(IdeContext c) =>
+            c != null && c.HasEditor && (HasIdentity ? c.WindowKey == Key : IsSameControl(c));
+
+        public bool IsSameControl(IdeContext c) => c != null && EditorHandle != 0 && c.EditorHandle == EditorHandle;
+
+        public override string ToString() => Name;
     }
 
     public sealed class QueryResult

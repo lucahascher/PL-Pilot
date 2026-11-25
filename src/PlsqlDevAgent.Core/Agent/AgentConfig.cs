@@ -100,6 +100,11 @@ namespace PlsqlDevAgent.Agent
         public bool SeparateSession { get; set; } = true;
         /// <summary>Queries use the DBA_ data dictionary views instead of ALL_ (company policy of some DBA teams).</summary>
         public bool UseDbaViews { get; set; } = false;
+        /// <summary>
+        /// The agent's SQL runs serially: its own session gets ALTER SESSION DISABLE PARALLEL QUERY/DML/DDL, its
+        /// statements a NO_PARALLEL hint (DBA policy for development databases with few CPU cores).
+        /// </summary>
+        public bool DisableParallel { get; set; } = true;
         public bool AutoApproveEditorEdits { get; set; } = false;
         public bool AutoApproveSql { get; set; } = false;
         public bool AutoApproveFileWrites { get; set; } = false;

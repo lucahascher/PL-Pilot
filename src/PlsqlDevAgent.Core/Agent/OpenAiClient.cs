@@ -29,6 +29,11 @@ namespace PlsqlDevAgent.Agent
         public List<ToolCall> ToolCalls = new List<ToolCall>();
         public string FinishReason;
         public JObject Usage;
+        /// <summary>
+        /// Index in <see cref="Content"/> where the model started writing a tool call as plain text (template tokens the
+        /// server did not turn into a tool call, e.g. because the output limit cut it off); -1 if none. That text is not shown.
+        /// </summary>
+        public int RawToolCallAt = -1;
     }
 
     public interface IStreamSink
@@ -232,8 +237,17 @@ namespace PlsqlDevAgent.Agent
                         SplitThink(c, ref inThinkTag, out var visible, out var thought);
                         if (thought.Length > 0) { reasoning.Append(thought); sink?.OnReasoning(thought); }
                         visible = StripControlTokens(visible);
-                        if (visible.Length > 0) { content.Append(visible); sink?.OnContent(visible); }
-                        if (repetition.IsLooping(content))
+                        if (visible.Length > 0)
+                        {
+                            content.Append(visible);
+                            // a tool call in the model's template syntax is not an answer: stop showing the text from there
+                            if (turn.RawToolCallAt < 0) turn.RawToolCallAt = RawToolCallStart(content, visible.Length);
+                            if (turn.RawToolCallAt < 0) sink?.OnContent(visible);
+                            else if (turn.RawToolCallAt > content.Length - visible.Length)
+                                sink?.OnContent(visible.Substring(0, turn.RawToolCallAt - (content.Length - visible.Length)));
+                        }
+                        // code inside a tool call written as text repeats itself legitimately (and is not shown)
+                        if (turn.RawToolCallAt < 0 && repetition.IsLooping(content))
                         {
                             // stop reading: closing the response makes the server stop generating
                             turn.FinishReason = "repetition";
@@ -278,6 +292,24 @@ namespace PlsqlDevAgent.Agent
             turn.Reasoning = reasoning.ToString();
             turn.ToolCalls = calls.Values.Where(c => !string.IsNullOrEmpty(c.Name)).ToList();
             return turn;
+        }
+
+        /// <summary>Start tokens of tool calls in model templates (DeepSeek "&lt;｜tool▁calls▁begin｜&gt;", Qwen/Hermes "&lt;tool_call&gt;").</summary>
+        private static readonly Regex RawToolCallToken = new Regex(@"<[｜|]tool[▁_]call|<tool_call>|<\|tool_call", RegexOptions.Compiled);
+
+        /// <summary>Position of the first tool call start token in <paramref name="text"/>, or -1.</summary>
+        internal static int RawToolCallIndex(string text)
+        {
+            var m = RawToolCallToken.Match(text ?? "");
+            return m.Success ? m.Index : -1;
+        }
+
+        /// <summary>Position of a tool call start token that ends in the last <paramref name="newChars"/> characters, or -1.</summary>
+        internal static int RawToolCallStart(StringBuilder content, int newChars)
+        {
+            int from = Math.Max(0, content.Length - newChars - 16); // a token may be split across chunks
+            var m = RawToolCallToken.Match(content.ToString(from, content.Length - from));
+            return m.Success ? from + m.Index : -1;
         }
 
         /// <summary>

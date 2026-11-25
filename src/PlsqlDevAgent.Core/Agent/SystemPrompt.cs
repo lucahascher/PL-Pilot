@@ -37,6 +37,7 @@ namespace PlsqlDevAgent.Agent
 
 # Modes and context
 - The active window in <ide_context> is only what the user happens to have open in PL/SQL Developer; it may have nothing to do with the request, especially when the user names other objects (e.g. with @). Use it only when the request refers to it (""this code"", ""the editor"", ""my query"", ""the selection"") or is clearly about the same objects; otherwise ignore it and do not try to find a connection between it and the request. When the user has excluded it, do not read or change it.
+- The editor tools (get_editor_text, edit_editor, set_editor_text, get_selected_text, get_result_grid, compile_plsql with from_editor) keep working on that window for the whole request, even when the user activates another window while you work – the user may keep working elsewhere; just continue. After open_object, open_new_window or open_file_in_ide they work on the window you opened. In your answers name the window by the object or file it shows (e.g. ""the package body EMP_API""), not as ""the active window"".
 - Each user message starts with an <ide_context> block (connection, active window, agent mode). If the mode is READ-ONLY (read-only setting or a protected production connection), tools that change the editor, the database or files are not available: explain the change and show the code instead, and tell the user why.
 - <attachments> after a user message contain files the user referenced with @name and an object dossier (like explore_objects) of the database objects referenced with @name. Use them instead of looking the same things up again.
 - Before you replace or drop a PL/SQL unit or view, the previous version is backed up automatically (see list_backups / restore_backup).
@@ -86,6 +87,7 @@ namespace PlsqlDevAgent.Agent
             sb.Append(string.IsNullOrWhiteSpace(cfg.SystemPromptOverride) ? DefaultBasePrompt : cfg.SystemPromptOverride.Trim());
             sb.Append("\n\n").Append(ToolRules).Append('\n');
             if (cfg.UseDbaViews) sb.Append(DbaViews.PromptRule).Append('\n');
+            if (cfg.DisableParallel) sb.Append(SerialSql.PromptRule).Append('\n');
             if (!hasFileTools)
                 sb.Append("\nNo project folder is configured, so file tools are not available.\n");
             else
@@ -133,6 +135,7 @@ namespace PlsqlDevAgent.Agent
                 "Unqualified names refer to the current schema given in the context (the user's schema); qualify objects of other " +
                 "schemas (OWNER.NAME). Other helpers may work in parallel in the same database session.\n");
             if (cfg.UseDbaViews) sb.Append(DbaViews.PromptRule).Append('\n');
+            if (cfg.DisableParallel) sb.Append(SerialSql.PromptRule).Append('\n');
             if (cfg.HasWorkspace)
                 sb.Append("The project folder holds local source files of database objects in sub folders (e.g. one per schema); the file " +
                           "tools include all sub folders, and find_object_files shows which local files contain an object.\n");
@@ -152,7 +155,7 @@ namespace PlsqlDevAgent.Agent
             sb.Append('\n');
             if (c.WindowType == IdeWindowType.None) sb.Append($"Active window: {c.WindowLabel}\n");
             else if (windowExcluded) sb.Append("Active window: excluded by the user – not part of this request; do not read or change it\n");
-            else sb.Append($"Active window (open in the IDE, may be unrelated to the request): {c.WindowLabel}\n");
+            else sb.Append($"Active window (open in the IDE, may be unrelated to the request; the editor tools work on it for this whole request): {c.WindowLabel}\n");
             if (planMode) sb.Append("Agent mode: PLAN MODE – investigate read-only and propose a plan; do not change anything\n");
             else if (guard != null) sb.Append($"Agent mode: {guard.Describe()}\n");
             foreach (var n in notes ?? Enumerable.Empty<string>()) sb.Append($"Note: {n}\n");

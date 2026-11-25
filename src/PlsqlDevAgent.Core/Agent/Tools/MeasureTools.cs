@@ -184,7 +184,7 @@ namespace PlsqlDevAgent.Agent.Tools
             // the DBA views setting: measure what run_query would execute
             var executed = sql;
             List<string> dbaViews = null;
-            var dbaIde = ctx.Ide as DbaViewsIde;
+            var dbaIde = ctx.DbaViewsIde;
             if (dbaIde != null) executed = dbaIde.Rewrite(sql, out dbaViews);
 
             var tag = "PDA_MEASURE_" + Guid.NewGuid().ToString("N").Substring(0, 12).ToUpperInvariant();
@@ -206,12 +206,12 @@ namespace PlsqlDevAgent.Agent.Tools
                     ExecResult res;
                     try
                     {
-                        res = ctx.Ide.Execute(Block("/* " + tag + " */ " + executed, binds, m.Query));
+                        res = ctx.Ide.Execute(Block("/* " + tag + " */ " + ctx.Serial(executed), binds, m.Query));
                         if (!res.Ok && dbaIde != null && !ReferenceEquals(executed, sql) && DbaViewsIde.IsFallbackError(res.ErrorCode))
                         {
                             dbaIde.MarkUnreadable(dbaViews, res.ErrorCode, executed);
                             executed = sql;
-                            res = ctx.Ide.Execute(Block("/* " + tag + " */ " + executed, binds, m.Query));
+                            res = ctx.Ide.Execute(Block("/* " + tag + " */ " + ctx.Serial(executed), binds, m.Query));
                         }
                     }
                     finally

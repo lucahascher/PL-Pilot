@@ -325,7 +325,10 @@ namespace PlsqlDevAgent.Agent.Tools
         {
             var path = Workspace.Resolve(ctx, ReqStr(args, "path"));
             if (!File.Exists(path)) return Task.FromResult("File not found.");
-            return Task.FromResult(ctx.Ide.OpenFile(path) ? $"Opened {Workspace.Relative(ctx, path)}." : "PL/SQL Developer could not open the file.");
+            if (!ctx.Ide.OpenFile(path)) return Task.FromResult("PL/SQL Developer could not open the file.");
+            var opened = ctx.Ide.GetContext();
+            if (opened.HasEditor) ctx.BindEditorWindow(opened);
+            return Task.FromResult($"Opened {Workspace.Relative(ctx, path)}. The editor tools now work on its window.");
         }
     }
 }

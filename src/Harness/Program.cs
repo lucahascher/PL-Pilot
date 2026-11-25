@@ -151,6 +151,9 @@ namespace PlsqlDevAgent.Harness
             try { return JsonConvert.DeserializeObject<object>(r ?? "null")?.ToString() ?? ""; } catch { return r ?? ""; }
         }
 
+        /// <summary>A statement as the agent wrote it: without the NO_PARALLEL hint of the setting "No parallel execution".</summary>
+        private static string Plain(string sql) => (sql ?? "").Replace(" /*+ NO_PARALLEL */", "");
+
         private void Check(string name, bool ok)
         {
             if (ok) _pass++; else _fail++;
@@ -189,8 +192,12 @@ namespace PlsqlDevAgent.Harness
                 log.WriteLine("busy now: " + chat.IsBusy);
                 if (_prompt.StartsWith("Please improve"))
                 {
-                    if (PlsqlDevAgent.Util.L.German) await GermanChecks();
-                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SpeedChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); await McpChecks(); await McpTeamChecks(); await SourceReadChecks(); await ExploreChecks(); await WindowAndProgressChecks(); await LocalFilesChecks(); await FocusChecks(); }
+                    // HARNESS_ONLY=<method>: only this group of checks (e.g. BindingAndLargeUnitChecks), for quick iterations
+                    var only = Environment.GetEnvironmentVariable("HARNESS_ONLY");
+                    if (!string.IsNullOrEmpty(only))
+                        await (Task)GetType().GetMethod(only, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(this, null);
+                    else if (PlsqlDevAgent.Util.L.German) await GermanChecks();
+                    else { await FeatureChecks(); await LongTaskChecks(); await ParallelAndScrollChecks(); await RewindUiChecks(); await TransactionUiChecks(); await SchemaChecks(); await SpeedChecks(); await SecurityUiChecks(); await PromptChecks(); await ContextWindowChecks(); await LoopChecks(); await McpChecks(); await McpTeamChecks(); await SourceReadChecks(); await ExploreChecks(); await WindowAndProgressChecks(); await BindingAndLargeUnitChecks(); await SerialSqlChecks(); await LocalFilesChecks(); await FocusChecks(); }
                 }
 
                 var transcript = await chat.ExecuteScriptAsync("document.getElementById('messages').innerText");
@@ -534,7 +541,7 @@ namespace PlsqlDevAgent.Harness
             Check($"the active window is shown above the input ({chip})", chip.StartsWith("winrow show") && chip.Contains("EMP_API"));
             await SendAndWait("TOOL: get_editor_text {}");
             Check("an included window is described as possibly unrelated, and the agent can read it",
-                MockLlmServer.LastUserContent.Contains("Active window (open in the IDE, may be unrelated to the request)") && LastToolResult().Contains("EMP_API"));
+                MockLlmServer.LastUserContent.Contains("Active window (open in the IDE, may be unrelated to the request") && LastToolResult().Contains("EMP_API"));
             Check("the tool rules say the open window may have nothing to do with the request",
                 MockLlmServer.LastSystemPrompt.Contains("it may have nothing to do with the request") && !MockLlmServer.LastSystemPrompt.Contains("Read the active editor (get_editor_text)"));
 
@@ -592,6 +599,120 @@ namespace PlsqlDevAgent.Harness
             await _chat.CapturePageAsync(Path.Combine(_autoTestDir, "status-done.png"));
             await Js("document.getElementById('winChip').click()");
             await Task.Delay(400);
+        }
+
+        /// <summary>
+        /// The editor tools stay on the window of the request when the user activates another window meanwhile; large units
+        /// are changed with edit_object_source or compiled from the editor instead of being sent whole; a tool call cut off
+        /// by the output limit is neither executed nor shown as text.
+        /// </summary>
+        private async Task BindingAndLargeUnitChecks()
+        {
+            await NewChat();
+            Editor.Text = SampleCode;
+            _ide.OtherWindowActive = false;
+            var otherBefore = _ide.OtherWindowText;
+            await Submit("SLOWMODEL\nTOOL: get_ide_context {}\nTOOL: edit_editor {\"old_string\":\"list_emps\",\"new_string\":\"list_all_emps\",\"replace_all\":true}");
+            await Task.Delay(700); // the request has started with the EMP_API window; the model answers after 1.5 s
+            _ide.OtherWindowActive = true; // meanwhile the user activates another window
+            await WaitIdle();
+            await Task.Delay(700);
+            var results = Newtonsoft.Json.Linq.JArray.Parse(MockLlmServer.LastMessagesJson).Where(m => (string)m["role"] == "tool").Select(m => (string)m["content"]).ToList();
+            var ctxResult = results.FirstOrDefault(r => r.StartsWith("Connection:")) ?? "";
+            Check($"after the user switched windows, get_ide_context names the request's window and the active one ({ctxResult.Replace("\n", " | ")})",
+                ctxResult.Contains("Editor window of this request (the editor tools work on it): Program window for PACKAGE BODY SCOTT.EMP_API") &&
+                ctxResult.Contains("Window the user has active now: Sql window"));
+            Check($"edit_editor changed the request's window (EMP_API), not the window the user activated ({results.LastOrDefault()?.Split('\n')[0]})",
+                Editor.Text.Contains("list_all_emps") && _ide.OtherWindowText == otherBefore &&
+                (results.LastOrDefault() ?? "").StartsWith("Editor updated (Program window for PACKAGE BODY SCOTT.EMP_API)"));
+            await SendAndWait("TOOL: get_editor_text {}");
+            Check("the next request works on the window that is active when it is sent", LastToolResult().Contains("select * from dept"));
+            _ide.OtherWindowActive = false;
+            Editor.Text = SampleCode;
+
+            // compile the editor text without repeating it
+            await NewChat();
+            int before = _ide.ExecutedSql.Count;
+            await SendAndWait("TOOL: compile_plsql {\"from_editor\":true}");
+            var compiled = _ide.ExecutedSql.Skip(before).FirstOrDefault(s => s.StartsWith("create or replace package body emp_api", StringComparison.OrdinalIgnoreCase)) ?? "";
+            Check($"compile_plsql from_editor compiles the editor text ({LastToolResult().Split('\n')[0]})",
+                compiled.Contains("end list_emps;") && LastToolResult().Contains("PACKAGE BODY SCOTT.EMP_API: compiled successfully"));
+            await SendAndWait("TOOL: compile_plsql {}");
+            Check("compile_plsql without code says how to pass it", LastToolResult().StartsWith("Not executed: pass exactly one of source, from_editor=true or file"));
+
+            // edit_object_source: only the changed lines, applied to the stored source, then compiled
+            before = _ide.ExecutedSql.Count;
+            await SendAndWait("TOOL: edit_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\",\"edits\":[{\"old_string\":\"dbms_output.put_line(r.ename);\",\"new_string\":\"dbms_output.put_line(r.ename || ' ' || r.job);\"}]}");
+            var edited = _ide.ExecutedSql.Skip(before).FirstOrDefault(s => s.StartsWith("CREATE OR REPLACE package body emp_api", StringComparison.OrdinalIgnoreCase)) ?? "";
+            var res = LastToolResult();
+            Check($"edit_object_source applies the edit to the stored source and compiles it ({res.Replace("\n", " | ")})",
+                edited.Contains("r.ename || ' ' || r.job") && edited.Contains("end list_emps;") && res.StartsWith("Applied 1 edit(s) to PACKAGE BODY SCOTT.EMP_API") &&
+                res.Contains("+      dbms_output.put_line(r.ename || ' ' || r.job);") && res.Contains("compiled successfully"));
+            before = _ide.ExecutedSql.Count;
+            await SendAndWait("TOOL: edit_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\",\"edits\":[{\"old_string\":\"no such line\",\"new_string\":\"x\"}]}");
+            Check($"an edit that does not match changes nothing ({LastToolResult().Split('\n')[0]})",
+                LastToolResult().Contains("Edit 1 of 1 (PACKAGE BODY SCOTT.EMP_API): old_string was not found") &&
+                !_ide.ExecutedSql.Skip(before).Any(s => s.StartsWith("CREATE OR REPLACE", StringComparison.OrdinalIgnoreCase)));
+            Check("the tool rules and descriptions steer large units away from whole-source compiles",
+                MockLlmServer.LastRequestToolsJson.Contains("edit_object_source") && MockLlmServer.LastRequestToolsJson.Contains("from_editor"));
+
+            // a tool call cut off by the output limit: not executed, its arguments not shown in full, the model is told why
+            await NewChat();
+            before = _ide.ExecutedSql.Count;
+            await SendAndWait("CUTOFFCALL");
+            var input = await Js("(document.querySelector('.tool .tbody pre') || {}).textContent || ''"); // inside a closed <details>: no innerText
+            var notices = await Js("Array.from(document.querySelectorAll('.notice')).map(n => n.innerText).join(' | ')");
+            var msgs = await Js("document.getElementById('messages').innerText");
+            Check($"a tool call cut off at max tokens is not executed; its input is shortened ({input.Length} chars) and a notice explains it ({notices})",
+                !_ide.ExecutedSql.Skip(before).Any(s => s.StartsWith("create or replace", StringComparison.OrdinalIgnoreCase)) &&
+                input.Length < 1700 && input.Contains("characters)") && notices.Contains("max tokens limit") &&
+                msgs.Contains("edit_object_source instead"));
+            await NewChat();
+            await SendAndWait("CUTOFFTEXT");
+            msgs = await Js("document.getElementById('messages').innerText");
+            var hist = MockLlmServer.LastMessagesJson;
+            var conditions = new[]
+            {
+                ("text before it shown", msgs.Contains("I will compile the package now.")),
+                ("template tokens hidden", !msgs.Contains("tool▁call")),
+                ("cut-off code hidden", !msgs.Contains("procedure p is begin null")),
+                ("model continued", msgs.Contains("edit_object_source instead")),
+                ("history marks it", hist.Contains("[tool call written as plain text, not executed]")),
+                ("model told", hist.Contains("max_tokens limit")),
+            };
+            Check("a tool call the server returned as template text is hidden, not executed, and the model is told about the output limit (" +
+                  string.Join(", ", conditions.Select(c => c.Item1 + ": " + c.Item2)) + ")", conditions.All(c => c.Item2));
+        }
+
+        /// <summary>
+        /// Setting "No parallel execution" (on by default): the agent's queries and DML get NO_PARALLEL, PARALLEL hints are
+        /// removed (not inside strings), ALTER SESSION ENABLE/FORCE PARALLEL is refused; with the setting off nothing changes.
+        /// </summary>
+        private async Task SerialSqlChecks()
+        {
+            await NewChat();
+            string Ran(string marker) => _ide.ExecutedSql.LastOrDefault(s => s.Contains(marker) && !s.TrimStart().StartsWith("explain", StringComparison.OrdinalIgnoreCase)) ?? "";
+            await SendAndWait("TOOL: run_query {\"sql\":\"select /*+ parallel(e 8) full(e) */ count(*) from emp e where e.ename <> '/*+ parallel(4) */'\"}");
+            var q = Ran("from emp e where e.ename");
+            Check($"a query gets NO_PARALLEL, its PARALLEL hint is removed, other hints and strings stay ({q})",
+                q.Contains("NO_PARALLEL") && !q.Contains("parallel(e 8)") && q.Contains("full(e)") && q.Contains("'/*+ parallel(4) */'"));
+            await SendAndWait("TOOL: run_query {\"sql\":\"with d as (select /*+ parallel */ deptno from dept) select d.deptno from d\"}");
+            q = Ran("from dept) select");
+            // run_query wraps the query (select * from (…) where rownum …): the statement-level hint goes on the outer query
+            Check($"WITH: the statement gets NO_PARALLEL, the hint in the subquery is removed ({q.Replace("\n", " ")})",
+                q.TrimStart().StartsWith("select /*+ NO_PARALLEL */", StringComparison.OrdinalIgnoreCase) && q.Contains("with d as (select deptno from dept)") &&
+                !System.Text.RegularExpressions.Regex.IsMatch(q, @"\bparallel\b"));
+            await SendAndWait("EXECSQL: alter session force parallel query parallel 4");
+            Check($"ALTER SESSION FORCE PARALLEL is refused ({LastToolResult()})",
+                LastToolResult().Contains("parallel execution is switched off for the agent") && !_ide.ExecutedSql.Any(s => s.Contains("force parallel")));
+            Check("the model is told that parallel execution is off", MockLlmServer.LastSystemPrompt.Contains("Parallel execution is switched off for your database session"));
+
+            _chat.ApplyConfigForTest(c => c.DisableParallel = false);
+            await NewChat();
+            await SendAndWait("TOOL: run_query {\"sql\":\"select /*+ parallel(2) */ count(*) from emp x\"}");
+            q = Ran("from emp x");
+            Check($"with the setting off the query is unchanged ({q})", q.Contains("parallel(2)") && !q.Contains("NO_PARALLEL") && !MockLlmServer.LastSystemPrompt.Contains("Parallel execution is switched off"));
+            _chat.ApplyConfigForTest(c => c.DisableParallel = true);
         }
 
         /// <summary>
@@ -1264,7 +1385,7 @@ namespace PlsqlDevAgent.Harness
             Check("Enter in the empty feedback field does not approve", await Js("document.querySelectorAll('.approval:not(.done)').length") == "1");
             await Js("document.querySelector('.approval:not(.done) button[data-a=\"yes\"]').click()");
             await WaitIdle();
-            Check("after the short delay Allow works", _ide.ExecutedSql.Any(s => s.StartsWith("update emp set sal = sal where deptno = 10")));
+            Check("after the short delay Allow works", _ide.ExecutedSql.Any(s => Plain(s).StartsWith("update emp set sal = sal where deptno = 10")));
             await Js("document.getElementById('input').value = ''");
 
             // 3. with "Auto approve SQL": sensitive statements still ask (without "Always Allow"), normal ones run
@@ -1283,13 +1404,13 @@ namespace PlsqlDevAgent.Harness
                 await Task.Delay(800);
                 if (asked) await Js("document.querySelector('.approval:not(.done) button[data-a=\"no\"]').click()");
                 await WaitIdle();
-                Check("rejected, so not executed: " + sql.Substring(0, Math.Min(20, sql.Length)), !_ide.ExecutedSql.Any(s => s.StartsWith(sql.Substring(0, Math.Min(20, sql.Length)))));
+                Check("rejected, so not executed: " + sql.Substring(0, Math.Min(20, sql.Length)), !_ide.ExecutedSql.Any(s => Plain(s).StartsWith(sql.Substring(0, Math.Min(20, sql.Length)))));
             }
             int cards = int.Parse(await Js("document.querySelectorAll('.approval').length"));
             await Submit("EXECSQL: insert into dept values (40, 'OPERATIONS', 'BOSTON')");
             await WaitIdle();
             Check("a normal statement runs without a card when auto-approve is on",
-                _ide.ExecutedSql.Any(s => s.StartsWith("insert into dept values (40")) && int.Parse(await Js("document.querySelectorAll('.approval').length")) == cards);
+                _ide.ExecutedSql.Any(s => Plain(s).StartsWith("insert into dept values (40")) && int.Parse(await Js("document.querySelectorAll('.approval').length")) == cards);
             _chat.ApplyConfigForTest(c => c.AutoApproveSql = false);
             await Js(AutoApproveJs);
 
@@ -1564,7 +1685,7 @@ namespace PlsqlDevAgent.Harness
                 q = ExecutedCount();
                 await SendAndWait("TOOL: get_object_source {\"name\":\"EMP_API\",\"object_type\":\"PACKAGE BODY\",\"start_line\":2,\"end_line\":4,\"with_line_numbers\":true}");
                 Check("after ORA-01489 (very long line) the source is read line by line, same result",
-                    LastToolResult() == src && ExecutedSince(q).Any(s => s.StartsWith("select line, line last_line, total, text")));
+                    LastToolResult() == src && ExecutedSince(q).Any(s => Plain(s).StartsWith("select line, line last_line, total, text")));
                 _ide.FailJoinedSource = false;
                 // a long body with a procedure at its end, longer than the output limit
                 Editor.Text = SampleCode.Replace("end emp_api;\r\n", "") +
@@ -1589,7 +1710,7 @@ namespace PlsqlDevAgent.Harness
                 _ide.EstimateSeconds = 120;
                 await Js("clearInterval(window.__autoApprove)");
                 const string slowSql = "TOOL: run_query {\"sql\":\"select * from emp order by sal desc\"}";
-                bool Ran(int from) => ExecutedSince(from).Any(s => s.StartsWith("select * from (") && s.Contains("order by sal desc") && s.Contains("rownum <= "));
+                bool Ran(int from) => ExecutedSince(from).Any(s => Plain(s).StartsWith("select * from (") && s.Contains("order by sal desc") && s.Contains("rownum <= "));
                 q = ExecutedCount();
                 await Submit(slowSql);
                 bool asked = await WaitForCard();
@@ -1626,7 +1747,7 @@ namespace PlsqlDevAgent.Harness
                 Check("the result says how long the query took: " + LastToolResult().Split('\n').Last(), System.Text.RegularExpressions.Regex.IsMatch(LastToolResult(), @"\(The query took 1\.\d s\.\)"));
 
                 // 6. three parallel helpers run exactly the same slow query: it runs once, all get the result
-                int Slow() { lock (_ide.ExecutedSql) return _ide.ExecutedSql.Count(s => s.StartsWith("select * from (") && s.Contains("pda_slow_objects")); }
+                int Slow() { lock (_ide.ExecutedSql) return _ide.ExecutedSql.Count(s => Plain(s).StartsWith("select * from (") && s.Contains("pda_slow_objects")); }
                 int before = Slow();
                 await SendAndWait("SAMEQUERY research");
                 Check($"3 parallel helpers with the same query: it ran once ({Slow() - before} times)", Slow() - before == 1);

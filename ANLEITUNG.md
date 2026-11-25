@@ -50,6 +50,7 @@ Daten gehen nur an diesen Server. Diese Kurzanleitung richtet sich an Anwender; 
 | Befehle | `/` tippen: `/explain`, `/review`, `/document`, `/test`, `/optimize`, `/fix`, `/compact`, `/new`, `/help` |
 | Objekte oder Dateien anhängen | `@` tippen, z. B. `@PKG_AUFTRAG @AUFTRAG` – für Datenbankobjekte wird ein Dossier mitgeschickt (Quelltext bzw. Tabellenstruktur, verwendete Tabellen und Packages, Aufrufer mit ihren Zeilen, Fremdschlüssel-Nachbarn). Die Vorschläge beim Tippen fragen die Datenbank ab; abschaltbar mit der Einstellung *Objekte nach @ vorschlagen* |
 | Aktives Fenster ausblenden | Über dem Eingabefeld steht das geöffnete Fenster. Der Agent weiß, dass es offen ist, liest es aber nur, wenn sich die Anfrage darauf bezieht. Ein Klick darauf streicht es durch: Dann sieht der Agent es nicht und darf es weder lesen noch ändern (gilt für dieses Fenster, bis Sie erneut klicken) |
+| Während der Agent arbeitet weiterarbeiten | Der Agent bleibt bei dem Fenster, das beim Absenden aktiv war (oder das er selbst geöffnet hat) – auch wenn Sie inzwischen in ein anderes Fenster wechseln. Er liest und ändert es im Hintergrund, Ihr Fenster bleibt vorne. Wird das Fenster geschlossen, meldet er das, statt in einem anderen weiterzuschreiben |
 | Fortschritt verfolgen | Unter dem Eingabefeld steht, was der Agent gerade tut (wartet auf das Modell, denkt nach – mit seinem letzten Gedanken –, führt ein Tool aus, wartet auf Ihre Zustimmung) und wie lange schon, dazu Schritt, Gesamtzeit und erzeugte Tokens. Jeder Tool-Aufruf zeigt seine Dauer, jede Antwort endet mit Gesamtzeit, Modell-Durchläufen und Tool-Aufrufen |
 | Frühere Eingaben | `↑` / `↓` im leeren Eingabefeld |
 | Gespeicherte Chats | Uhr-Symbol im Chat-Kopf |
@@ -104,7 +105,11 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
   Tabellen, die per Fremdschlüssel verbunden sind. Das spart in großen Datenbanken viele langsame Einzelschritte.
   Tabelleninhalte werden dabei nicht gelesen.
 - **Große Packages** liest der Agent abschnittsweise: Ist eine Einheit zu lang für eine Antwort, sieht er eine
-  Liste der übrigen Prozeduren und Funktionen mit Zeilennummern und liest gezielt weiter.
+  Liste der übrigen Prozeduren und Funktionen mit Zeilennummern und liest gezielt weiter. **Ändern** kann er
+  Packages jeder Größe: Mit `edit_object_source` schickt er nur die geänderten Zeilen, PL/Pilot setzt sie in den
+  Quelltext aus der Datenbank ein, zeigt den Diff zur Zustimmung und kompiliert. Code im Editorfenster kompiliert er
+  mit `compile_plsql` direkt aus dem Fenster, ohne ihn noch einmal zu senden. (Vorher musste das Modell ein ganzes
+  Package in seine Antwort schreiben – bei z. B. 4.000 Zeilen reicht das Ausgabelimit *Max. Tokens* dafür nicht.)
 - **Messen statt raten:** Bei Fragen wie „Ist diese Abfrage schneller?“ führt PL/Pilot beide Varianten aus,
   vergleicht Laufzeit und CPU-Zeit und prüft, dass beide dieselben Zeilen liefern. Mit Leserecht auf die V$-Views
   (z. B. `SELECT_CATALOG_ROLE`, beim DBA beantragen) zeigt er zusätzlich den tatsächlichen Ausführungsplan
@@ -136,6 +141,12 @@ ebenso wenig bei sonstigem DDL. Die Informationen gelten, bis PL/SQL Developer g
 - **DBA-Views verwenden** (Einstellungen → Sicherheit): Alle Abfragen des Agents lesen `DBA_TABLES`,
   `DBA_OBJECTS` … statt der `ALL_`-Views – auch die Abfragen, die das Modell selbst schreibt. Benötigt die Rolle
   `SELECT_CATALOG_ROLE`; ohne sie werden automatisch die `ALL_`-Views verwendet.
+- **Keine parallele Ausführung** (Einstellungen → Sicherheit, standardmäßig an): Der Agent belegt keine
+  Parallel-Server (CPU-Kerne) der Datenbank – wichtig auf Entwicklungsdatenbanken mit wenigen Kernen. Seine eigene
+  Sitzung erhält `ALTER SESSION DISABLE PARALLEL QUERY / DML / DDL`, jede Abfrage und DML-Anweisung (auch beim
+  Messen, beim Ausführungsplan und bei der Laufzeitschätzung) einen `NO_PARALLEL`-Hint, und `PARALLEL`-Hints, die
+  das Modell schreibt, werden entfernt. `ALTER SESSION ENABLE/FORCE PARALLEL` lehnt PL/Pilot ab. Nutzt der Agent
+  Ihre Hauptsitzung (*Eigene Sitzung* aus), wird diese nicht umgestellt; die Hints gelten trotzdem.
 - Das Passwort der Verbindung wird nie gelesen.
 
 ## Externe Systeme (MCP-Server)
@@ -226,6 +237,11 @@ das Firmen-Stammzertifikat auf dem PC fehlt – ein Fingerabdruck. Nach Rückspr
 ## Hilfe bei Problemen
 
 - **Einstellungen → Log öffnen** zeigt die Protokolldatei (`%LOCALAPPDATA%\PlsqlDevAgent\agent.log`).
+- PL/SQL Developer reagiert nicht, solange der Agent arbeitet (vor allem mit Hilfsagenten): Der Agent hat dann
+  keine eigene Datenbanksitzung, und sein SQL läuft im Haupt-Thread der IDE. Einstellung **Eigene Sitzung**
+  (Einstellungen → Sicherheit) einschalten und in PL/SQL Developer unter *Einstellungen → Oracle → Verbindung* den
+  Sitzungsmodus *Multi-Sitzung* oder *Dual-Sitzung* wählen. PL/Pilot weist im Chat einmal darauf hin. Hängt die IDE
+  trotzdem, steht im Log, womit ihr Haupt-Thread beschäftigt war („did not respond for … s“).
 - Chat bleibt leer: Die *Microsoft Edge WebView2 Runtime* fehlt – bitte die IT ansprechen.
 - „Server nicht erreichbar“: Basis-URL prüfen und **Testen** klicken; ggf. *System-Proxy verwenden* ausschalten.
 - Sonderzeichen: Umlaute, ß, € und typografische Zeichen funktionieren. Zeichen außerhalb des Windows-Zeichensatzes

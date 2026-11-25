@@ -27,7 +27,7 @@ namespace PlsqlDevAgent.Agent.Tools
             var sql = PrepareStatement(ReqStr(args, "sql"));
             var original = sql;
             List<string> dbaViews = null;
-            var dbaIde = ctx.Ide as DbaViewsIde;
+            var dbaIde = ctx.DbaViewsIde;
             if (dbaIde != null) sql = dbaIde.Rewrite(sql, out dbaViews); // explain what run_query would execute
             var kw = FirstKeyword(sql);
             if (!new[] { "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE" }.Contains(kw))
@@ -51,11 +51,11 @@ namespace PlsqlDevAgent.Agent.Tools
 
         private static string Explain(ToolContext ctx, string sql, string original, string id, string format, DbaViewsIde dbaIde, List<string> dbaViews)
         {
-            var res = ctx.Ide.Execute($"explain plan set statement_id = '{id}' for {sql}");
+            var res = ctx.Ide.Execute($"explain plan set statement_id = '{id}' for {ctx.Serial(sql)}");
             if (!res.Ok && dbaIde != null && !ReferenceEquals(sql, original) && DbaViewsIde.IsFallbackError(res.ErrorCode))
             {
                 dbaIde.MarkUnreadable(dbaViews, res.ErrorCode, sql);
-                res = ctx.Ide.Execute($"explain plan set statement_id = '{id}' for {original}");
+                res = ctx.Ide.Execute($"explain plan set statement_id = '{id}' for {ctx.Serial(original)}");
             }
             if (!res.Ok) return "EXPLAIN PLAN failed: " + res.ErrorMessage;
             var plan = ctx.Ide.Query($"select plan_table_output from table(dbms_xplan.display('PLAN_TABLE', '{id}', '{format}'))", 1000);
@@ -68,20 +68,20 @@ namespace PlsqlDevAgent.Agent.Tools
     {
         public override string Name => "get_result_grid";
         public override string Description =>
-            "Returns the rows currently displayed in the result grid of the active SQL or Test window, i.e. the result of " +
-            "the query the user ran in PL/SQL Developer, together with the window's SQL text. Use it when the user asks " +
-            "about 'these results' or 'my query output'.";
+            "Returns the rows currently displayed in the result grid of the SQL or Test window of this request (the window " +
+            "the user had active when sending it), i.e. the result of the query the user ran in PL/SQL Developer, together " +
+            "with the window's SQL text. Use it when the user asks about 'these results' or 'my query output'.";
         public override JObject Parameters => Schema(Opt("max_rows", "integer", "Maximum rows to return (default 50)."));
 
         public override Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
-            var c = ctx.Ide.GetContext();
+            var c = ctx.EditorContext(out var window);
             if (ctx.ExcludedWindowMessage(c) is string excluded) return Task.FromResult(excluded);
             if (c.WindowType != IdeWindowType.Sql && c.WindowType != IdeWindowType.Test)
-                return Task.FromResult($"The active window is not a SQL or Test window ({c.WindowLabel}).");
-            var grid = ctx.Ide.GetResultGrid(Math.Max(1, Math.Min(Int(args, "max_rows", 50), 500)));
+                return Task.FromResult($"The window of this request is not a SQL or Test window ({c.WindowLabel}).");
+            var grid = ctx.Ide.GetResultGrid(Math.Max(1, Math.Min(Int(args, "max_rows", 50), 500)), window);
             var sb = new StringBuilder();
-            var sqlText = ctx.Ide.GetEditorText();
+            var sqlText = ctx.Ide.GetEditorText(window);
             sb.Append("SQL in the window:\n").Append(Db.Truncate(sqlText.Replace("\r\n", "\n").Trim(), 4000)).Append("\n\n");
             if (grid.Columns.Count == 0 && grid.Rows.Count == 0)
                 sb.Append("The result grid is empty (the query has not been executed or returned no rows).");

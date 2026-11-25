@@ -76,6 +76,7 @@ namespace PlsqlDevAgent.Agent
             _ctx.SetTasks = SetTasks;
             _ctx.WindowExcluded = IsWindowExcluded;
             _ctx.ChangeTarget = new ToolContext.ChangeTargetHolder();
+            _ctx.EditorBinding = new ToolContext.EditorWindowHolder();
             _ctx.RunSubtask = task => RunSubtaskAsync(task, null, _ctx.Cancellation);
             _ctx.RecordChange = change =>
             {
@@ -342,6 +343,7 @@ namespace PlsqlDevAgent.Agent
             {
                 // database calls of this run stop waiting as soon as the user stops the agent
                 IdeCancellation.Current = ct;
+                var watch = MainThread.Watch(); // logs when PL/SQL Developer stops responding while the agent works
                 try
                 {
                     await work(ct).ConfigureAwait(false);
@@ -374,6 +376,7 @@ namespace PlsqlDevAgent.Agent
                 }
                 finally
                 {
+                    watch.Dispose();
                     Interlocked.Exchange(ref _busy, 0);
                     _ui.Busy(false);
                 }
@@ -383,6 +386,9 @@ namespace PlsqlDevAgent.Agent
 
         /// <summary>The schema the user works in: the session's schema when the current request started.</summary>
         private string _userSchema;
+
+        /// <summary>The user was told once that the agent shares PL/SQL Developer's main session (its SQL blocks the IDE).</summary>
+        private bool _sharedSessionNoticeShown;
 
         /// <summary>
         /// One user request. The agent starts in the schema the user works in; if something it ran may have switched
@@ -472,7 +478,17 @@ namespace PlsqlDevAgent.Agent
             try
             {
                 var ideCtx = _ide.GetContext();
+                // the editor tools work on this window for the whole request, also when the user activates another one
+                _ctx.BindEditorWindow(ideCtx);
                 _userSchema = ideCtx.Connected ? _ctx.CurrentSchema : null;
+                // known after the first statement: without a session of its own the agent's SQL blocks the IDE
+                if (ideCtx.Connected && !_ide.UsesOwnSession && !_sharedSessionNoticeShown)
+                {
+                    _sharedSessionNoticeShown = true;
+                    _ui.Notice(Config.SeparateSession
+                        ? L.T("PL/Pilot has no database session of its own here, so its SQL runs on PL/SQL Developer's main thread and the IDE does not react while a statement runs (helper agents can keep it busy for a long time). For a responsive IDE, set Preferences > Oracle > Connection > Session mode to \"Multi session\" or \"Dual session\" and keep the PL/Pilot setting \"Separate session\" on.")
+                        : L.T("The PL/Pilot setting \"Separate session\" is off, so the agent's SQL runs in PL/SQL Developer's main session on its main thread: the IDE does not react while a statement runs (helper agents can keep it busy for a long time). Turn the setting on for a responsive IDE (Settings, Safety)."));
+                }
                 contextBlock = SystemPrompt.ContextBlock(ideCtx, _userSchema, guard, notes, planMode, IsWindowExcluded(ideCtx));
             }
             catch (Exception ex)
@@ -487,7 +503,7 @@ namespace PlsqlDevAgent.Agent
             _history.Add(userMessage);
             if (_checkpoint != null) _checkpointMessages[_checkpoint] = (string)userMessage["content"];
 
-            int continues = 0, stepsInRound = 0, lookupTurns = 0, focusNudges = 0;
+            int continues = 0, stepsInRound = 0, lookupTurns = 0, focusNudges = 0, rawToolCalls = 0;
             bool progressSinceNudge = true;
             for (int step = 0; ; step++, stepsInRound++)
             {
@@ -529,6 +545,24 @@ namespace PlsqlDevAgent.Agent
                          (turn.Usage != null ? $", usage {turn.Usage.ToString(Formatting.None)}" : ""));
                 ReportUsage(turn, sentChars);
 
+                // a tool call the model wrote as template text (the server did not turn it into a call, typically because
+                // the output limit cut it off): not an answer – keep only the text before it and tell the model
+                bool cutOff = turn.FinishReason == "length";
+                if (turn.RawToolCallAt >= 0 && turn.ToolCalls.Count == 0)
+                {
+                    int at = OpenAiClient.RawToolCallIndex(turn.Content);
+                    var kept = (at >= 0 ? turn.Content.Substring(0, at) : turn.Content).TrimEnd();
+                    _history.Add(new JObject { ["role"] = "assistant", ["content"] = (kept.Length > 0 ? kept + "\n" : "") + "[tool call written as plain text, not executed]" });
+                    Log.Warn($"The model wrote a tool call as plain text ({turn.Content.Length - Math.Max(0, at)} chars, finish={turn.FinishReason ?? "-"})");
+                    _ui.Notice(cutOff
+                        ? L.T("The model's answer reached the max tokens limit ({0}) in the middle of a tool call. The call was not executed; the model was asked to send smaller steps (Settings, Max tokens).", Config.MaxTokens)
+                        : L.T("The server returned a tool call as plain text instead of executing it ({0}); it was hidden and the model was asked to repeat it properly.", Config.Model));
+                    if (++rawToolCalls > 2) break;
+                    _history.Add(new JObject { ["role"] = "user", ["content"] = cutOff ? CutOffToolCallNote(Config.MaxTokens)
+                        : "[Note from PL/Pilot: your last tool call arrived as plain text in your answer, so it was NOT executed. Call the tool again through the normal tool calling mechanism.]" });
+                    continue;
+                }
+
                 if (turn.FinishReason == "repetition")
                 {
                     // the model is stuck repeating itself: keep one copy and stop, continuing would only repeat the loop
@@ -565,7 +599,6 @@ namespace PlsqlDevAgent.Agent
                     // Self-prompting: keep the agent going while its task list has open items (or it was cut off),
                     // but only if it made progress since the last nudge, so it cannot loop without doing anything.
                     var open = OpenTasks();
-                    bool cutOff = turn.FinishReason == "length";
                     if (Config.AutoContinue && !planMode && continues < Config.MaxAutoContinues && progressSinceNudge && (open.Count > 0 || cutOff))
                     {
                         continues++;
@@ -601,8 +634,8 @@ namespace PlsqlDevAgent.Agent
                     while (batchEnd < calls.Count && CanRunInParallel(calls[batchEnd], tools)) batchEnd++;
                     var batch = calls.Skip(i).Take(Math.Max(1, batchEnd - i)).ToList();
                     var results = batch.Count == 1
-                        ? new[] { await ExecuteToolAsync(batch[0], tools).ConfigureAwait(false) }
-                        : await Task.WhenAll(batch.Select(c => ExecuteToolAsync(c, tools))).ConfigureAwait(false);
+                        ? new[] { await ExecuteToolAsync(batch[0], tools, cutOff).ConfigureAwait(false) }
+                        : await Task.WhenAll(batch.Select(c => ExecuteToolAsync(c, tools, cutOff))).ConfigureAwait(false);
                     for (int k = 0; k < batch.Count; k++)
                         _history.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = batch[k].Id, ["content"] = results[k] });
                     i += batch.Count;
@@ -623,6 +656,14 @@ namespace PlsqlDevAgent.Agent
                 }
             }
         }
+
+        /// <summary>For the model: its tool call was cut off by the output limit, and how to avoid large arguments.</summary>
+        internal static string CutOffToolCallNote(int maxTokens) =>
+            $"[Note from PL/Pilot: your output reached the max_tokens limit ({maxTokens} tokens) while you were writing a tool call, so " +
+            "the call was cut off and NOT executed. Never put large texts into tool arguments: change units that already exist in " +
+            "the database with edit_object_source (only the changed lines, any unit size), compile the editor text with compile_plsql " +
+            "from_editor=true and project files with compile_plsql file=...; write large new code in several smaller steps " +
+            "(e.g. edit_editor per subprogram). Continue now with such a smaller step.]";
 
         /// <summary>Model turns in a row with only lookups (no change, no task progress) before the focus note.</summary>
         public const int FocusNudgeAfterTurns = 10;
@@ -729,7 +770,8 @@ namespace PlsqlDevAgent.Agent
             return string.IsNullOrWhiteSpace(final.Content) ? "(the helper ran out of steps without a report)" : final.Content;
         }
 
-        private async Task<string> ExecuteToolAsync(ToolCall call, List<AgentTool> tools)
+        /// <param name="cutOff">The model's answer ended at the output limit: arguments that are not valid JSON were cut off.</param>
+        private async Task<string> ExecuteToolAsync(ToolCall call, List<AgentTool> tools, bool cutOff = false)
         {
             JObject args;
             try
@@ -738,8 +780,18 @@ namespace PlsqlDevAgent.Agent
             }
             catch (JsonException ex)
             {
-                _ui.ToolStart(call.Id, call.Name, "", call.Arguments);
-                var msg = "Error: the tool arguments are not valid JSON (" + ex.Message + "). Send valid JSON.";
+                // only the beginning of broken arguments is shown (they can hold a whole package)
+                var shown = call.Arguments ?? "";
+                if (shown.Length > 1500) shown = shown.Substring(0, 1500) + $"\n… ({shown.Length:N0} characters)";
+                _ui.ToolStart(call.Id, call.Name, cutOff ? L.T("cut off at the output limit") : "", shown);
+                string msg;
+                if (cutOff)
+                {
+                    msg = "Error: " + CutOffToolCallNote(Config.MaxTokens);
+                    Log.Warn($"Tool call {call.Name} cut off at max_tokens ({call.Arguments?.Length ?? 0} chars of arguments)");
+                    _ui.Notice(L.T("The model's answer reached the max tokens limit ({0}) in the middle of a tool call. The call was not executed; the model was asked to send smaller steps (Settings, Max tokens).", Config.MaxTokens));
+                }
+                else msg = "Error: the tool arguments are not valid JSON (" + ex.Message + "). Send valid JSON.";
                 _ui.ToolEnd(call.Id, false, msg, null);
                 return msg;
             }

@@ -68,7 +68,8 @@ It was written for locked-down company PCs: it installs **without administrator 
   control — and the agent reads the ticket and the commit history before it goes into the packages. Tools
   that change something there ask first, like every other change.
 - **Fits company rules.** Shared team rules (e.g. naming conventions on a network share), `AGENTS.md`
-  per project, an option to query `DBA_` instead of `ALL_` dictionary views, HTTPS with the Windows
+  per project, an option to query `DBA_` instead of `ALL_` dictionary views, no parallel execution on small
+  development databases, HTTPS with the Windows
   certificate store, no telemetry, configurable local data retention.
 - **English and German** user interface; the agent answers in your language.
 
@@ -171,7 +172,7 @@ Server-specific options can be added as *Extra request JSON*, e.g. `{"top_p": 0.
 | Planning | `update_tasks`, `run_subtask`, `ask_user` (a question with answer buttons) |
 | IDE | `get_ide_context`, `get_editor_text`, `get_selected_text`, `edit_editor`, `set_editor_text`, `open_new_window`, `open_object`, `get_result_grid` |
 | Database (read) | `run_query`, `list_objects`, `explore_objects`², `describe_object`, `get_object_source`, `search_source`, `get_compile_errors`, `explain_plan`, `measure_sql`¹, `find_dependencies`, `resolve_error_stack`, `list_backups` |
-| Database (change, with approval) | `compile_plsql`, `execute_sql`, `recompile_invalid`, `run_unit_tests`, `restore_backup` |
+| Database (change, with approval) | `compile_plsql`³, `edit_object_source`³, `execute_sql`, `recompile_invalid`, `run_unit_tests`, `restore_backup` |
 | Project folder (optional) | `list_files`, `find_object_files`, `read_file`, `search_files`, `write_file`, `edit_file`, `open_file_in_ide` |
 | External systems (optional) | the tools of your MCP servers, named `<server>__<tool>`, e.g. `tickets__get_ticket` |
 
@@ -186,8 +187,18 @@ table are marked), and with `depth` 2–3 the data model further along the forei
 batched, so a dossier costs a few dozen small queries however many neighbours there are. No table data is read.
 Whatever does not fit the size limit is listed by name at the end.
 
+³ Units of any size: `edit_object_source` applies exact replacements (only the changed lines) to the source stored
+in the database and compiles the result; `compile_plsql` compiles the text of the request's editor window
+(`from_editor`) or a project file (`file`) without the model repeating it. Passing a whole large unit as text
+does not fit into the model's output limit (*Max tokens*); a tool call cut off by that limit is not executed, and
+the model is told to use smaller steps.
+
 Large PL/SQL units are read in parts: `get_object_source` takes `start_line` / `end_line`, and a unit longer
 than the output limit ends with a list of the subprograms it did not show, with their line numbers.
+
+**The request's editor window.** The editor tools work on the window that was active when you sent the request
+(or the one the agent opened), even if you switch to another window while the agent works: PL/Pilot reads and
+changes it in the background (`IDE_SelectWindow`) and your window stays in front.
 
 ## Safety model
 
@@ -268,6 +279,12 @@ Most settings are self-explanatory in the settings page; a few worth knowing:
   shown above the input; click it to be asked again.
 - **Use DBA views** makes every query of the agent read `DBA_` instead of `ALL_` dictionary views (falls
   back to `ALL_` without `SELECT_CATALOG_ROLE`).
+- **No parallel execution** (on by default) keeps the agent from taking parallel execution servers, e.g. on a
+  development database with few CPU cores: its own session gets `ALTER SESSION DISABLE PARALLEL QUERY / DML / DDL`;
+  every query and DML statement – also inside `measure_sql`, `explain_plan` and the runtime estimates – gets a
+  statement-level `NO_PARALLEL` hint, and `PARALLEL` hints the model writes are removed (not inside string
+  literals). `ALTER SESSION ENABLE/FORCE PARALLEL` is refused. If the agent shares your main session (*Separate
+  session* off), that session is not altered; the hints still apply.
 - **Sub-task model** lets helper agents use a smaller, faster model.
 - **Size limits** follow the context window (*Limits Follow Context Window*, on by default): one tool result may
   use 5 % of the window (at least *Max Tool Result*, 40,000 characters), older tool results are shortened only
@@ -329,7 +346,8 @@ syntax-check the chat page.
 
 - **Harness** (`src\Harness`): runs the chat window outside PL/SQL Developer against a simulated IDE.
   `--mock-llm` uses a scripted fake model server, `--llm <baseUrl> <model>` a real one;
-  `--autotest <dir> [--offscreen]` runs the automated UI checks (including a scripted MCP server),
+  `--autotest <dir> [--offscreen]` runs the automated UI checks (including a scripted MCP server; environment
+  variable `HARNESS_ONLY=<check group>` runs one group, e.g. `BindingAndLargeUnitChecks`),
   `--screenshots <dir>` renders the images in this README, `--mcp <name>=<url>[|<header>]` adds an MCP server.
 - **MCP test server** (`tools\mcp-test-server`): a small ticket system with commit history, built with the
   official MCP Python SDK: `docker build -t plpilot-mcp-test tools/mcp-test-server`, then
@@ -342,7 +360,9 @@ syntax-check the chat page.
   `plsqldev.exe userid=scott/tiger@localhost:1521/FREEPDB1`. It writes `report.md` and closes the IDE; it
   refuses to run on any other or on a protected connection. Quick modes via
   `PLSQLDEVAGENT_AUTOTEST_PROMPT`: `SQL-ONLY`, `REWIND-ONLY`, `TXN-ONLY`, `TXN-CLOSE`, `SEC-ONLY`, `ANALYSIS-ONLY`, `LLM-TOOLS` (the configured model with the analysis tools),
-  `ENC-ONLY`, `HTTPS-ONLY`.
+  `ENC-ONLY`, `HTTPS-ONLY`, `WINDOW-ONLY` (the request's editor window, large units), `FREEZE-MEASURE` (IDE
+  responsiveness while the agent works; `PLSQLDEVAGENT_AUTOTEST_SHARED=1` with the main session), `BIGUNIT-LLM`
+  (the configured model with a 4,000-line package), `PARALLEL-ONLY` (setting *No parallel execution*).
 - A local test database: `docker run -d -p 1521:1521 -e ORACLE_PASSWORD=<pwd> -e APP_USER=scott -e APP_USER_PASSWORD=tiger gvenzl/oracle-free:23-slim-faststart`
   (PL/SQL Developer needs an Oracle client; the Instant Client is enough).
 
@@ -376,7 +396,9 @@ code page (1252 includes ä ö ü ß € „“ – …) everywhere. Common symb
 - Text that the ANSI code page cannot represent (see above) cannot be written to the editor or database.
 - A statement already running in the database cannot be interrupted; *Stop* stops waiting for it.
 - With *Separate session* off (or in PL/SQL Developer's single-session mode) the agent shares your session
-  and its SQL runs on the IDE main thread.
+  and its SQL runs on the IDE main thread: PL/SQL Developer does not react while a statement runs (helper agents
+  can keep it busy for long). PL/Pilot says so once in the chat; between statements the IDE now gets to handle
+  input. Stalls of the main thread while the agent works are written to the log with what caused them.
 - Rewind information is lost when PL/SQL Developer is closed.
 - `measure_sql` shows the actual execution plan and session statistics only if the user may read the V$ views
   (`SELECT_CATALOG_ROLE`, or SELECT on V$SQL, V$SQL_PLAN_STATISTICS_ALL, V$MYSTAT, V$STATNAME); otherwise it

@@ -37,6 +37,10 @@ namespace PlsqlDevAgent.Util
         {
             // agent run
             ["Stopped."] = "Gestoppt.",
+            ["The PL/Pilot setting \"Separate session\" is off, so the agent's SQL runs in PL/SQL Developer's main session on its main thread: the IDE does not react while a statement runs (helper agents can keep it busy for a long time). Turn the setting on for a responsive IDE (Settings, Safety)."] =
+                "Die PL/Pilot-Einstellung \"Eigene Sitzung\" ist ausgeschaltet. Das SQL des Agents läuft deshalb in der Hauptsitzung von PL/SQL Developer im Haupt-Thread: Die IDE reagiert nicht, solange eine Anweisung läuft (Hilfsagenten können sie lange beschäftigen). Für eine reaktionsfähige IDE die Einstellung einschalten (Einstellungen, Sicherheit).",
+            ["PL/Pilot has no database session of its own here, so its SQL runs on PL/SQL Developer's main thread and the IDE does not react while a statement runs (helper agents can keep it busy for a long time). For a responsive IDE, set Preferences > Oracle > Connection > Session mode to \"Multi session\" or \"Dual session\" and keep the PL/Pilot setting \"Separate session\" on."] =
+                "PL/Pilot hat hier keine eigene Datenbanksitzung. Sein SQL läuft deshalb im Haupt-Thread von PL/SQL Developer, und die IDE reagiert nicht, solange eine Anweisung läuft (Hilfsagenten können sie lange beschäftigen). Für eine reaktionsfähige IDE unter Einstellungen > Oracle > Verbindung den Sitzungsmodus auf \"Multi-Sitzung\" oder \"Dual-Sitzung\" stellen und die PL/Pilot-Einstellung \"Eigene Sitzung\" eingeschaltet lassen.",
             // security / local data
             ["This statement runs dynamic SQL whose effect cannot be checked beforehand."] = "Diese Anweisung führt dynamisches SQL aus, dessen Wirkung vorher nicht geprüft werden kann.",
             ["This statement changes privileges, users, roles or system settings."] = "Diese Anweisung ändert Berechtigungen, Benutzer, Rollen oder Systemeinstellungen.",
@@ -182,6 +186,14 @@ namespace PlsqlDevAgent.Util
             ["Modify file {0}"] = "Datei {0} ändern",
             ["{0} (current)"] = "{0} (aktuell)",
             ["{0} (proposed)"] = "{0} (Vorschlag)",
+            ["Change in database ({0}): {1}"] = "In der Datenbank ändern ({0}): {1}",
+            ["{0} (database)"] = "{0} (Datenbank)",
+            ["cut off at the output limit"] = "am Ausgabelimit abgeschnitten",
+            ["text of the editor window"] = "Text des Editorfensters",
+            ["The model's answer reached the max tokens limit ({0}) in the middle of a tool call. The call was not executed; the model was asked to send smaller steps (Settings, Max tokens)."] =
+                "Die Antwort des Modells hat mitten in einem Werkzeugaufruf das Limit Max. Tokens ({0}) erreicht. Der Aufruf wurde nicht ausgeführt; das Modell wurde gebeten, kleinere Schritte zu senden (Einstellungen, Max. Tokens).",
+            ["The server returned a tool call as plain text instead of executing it ({0}); it was hidden and the model was asked to repeat it properly."] =
+                "Der Server hat einen Werkzeugaufruf als reinen Text geliefert statt ihn auszuführen ({0}); er wurde ausgeblendet und das Modell gebeten, ihn korrekt zu wiederholen.",
             ["Restore {0} from backup {1} ({2})"] = "{0} aus Sicherung {1} wiederherstellen ({2})",
             ["Recompile {0} invalid objects ({1})"] = "{0} ungültige Objekte neu kompilieren ({1})",
             ["Measure in database ({0}), changes are rolled back"] = "In der Datenbank messen ({0}), Änderungen werden zurückgerollt",

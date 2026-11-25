@@ -794,23 +794,59 @@ namespace PlsqlDevAgent.Agent.Tools
             "function, trigger, type, view). Several units may be given separated by a line containing only '/'. " +
             "Returns compilation errors and compiler warnings (PLW-) with line numbers, and dependent objects that became " +
             "invalid. Each unit keeps the compiler settings stored with it (PLSQL_CCFLAGS, optimize level, native " +
-            "compilation, debug information). The user must approve. Typical use: compile the code you wrote in the " +
-            "editor (pass the full editor text) and fix errors until it compiles cleanly.";
+            "compilation, debug information). The user must approve. Pass the code in ONE of three ways: from_editor=true " +
+            "compiles the text of the editor window of this request (after edit_editor – do not repeat the text), file " +
+            "compiles a file of the project folder, source takes the text itself – only for new or short units: a long " +
+            "source does not fit into your output. To change a unit that is already in the database use edit_object_source.";
         public override JObject Parameters => Schema(
-            Req("source", "string", "Complete CREATE OR REPLACE source of one or more units ('/' line between units)."),
+            Opt("source", "string", "Complete CREATE OR REPLACE source of one or more new or short units ('/' line between units)."),
+            Opt("from_editor", "boolean", "true: compile the text of the editor window of this request (any size)."),
+            Opt("file", "string", "Compile this file of the project folder (path relative to it; any size)."),
             Opt("keep_settings", "boolean", "Default true. false: compile with the compiler settings of your session instead " +
                 "(only after you changed them on purpose, e.g. ALTER SESSION SET PLSQL_CCFLAGS)."));
         public override bool Mutating => true;
 
         public override string Summarize(JObject args)
         {
-            var parts = SplitOnSlash(Str(args, "source", ""));
-            return string.Join(", ", parts.Select(p => IsPlsqlUnit(p, out var t, out var o, out var n) ? $"{t} {n}" : RunQueryTool.OneLine(p)).Take(4));
+            if (Bool(args, "from_editor", false)) return L.T("text of the editor window");
+            if (!string.IsNullOrWhiteSpace(Str(args, "file"))) return Str(args, "file");
+            return SummarizeSource(Str(args, "source", ""));
+        }
+
+        private static string SummarizeSource(string source) =>
+            string.Join(", ", SplitOnSlash(source).Select(p => IsPlsqlUnit(p, out var t, out var o, out var n) ? $"{t} {n}" : RunQueryTool.OneLine(p)).Take(4));
+
+        /// <summary>The code to compile from source, the editor window of the request or a project file; null + message if not possible.</summary>
+        private static (string Source, string Error) ReadInput(JObject args, ToolContext ctx)
+        {
+            var source = Str(args, "source");
+            bool fromEditor = Bool(args, "from_editor", false);
+            var file = Str(args, "file");
+            int given = (string.IsNullOrWhiteSpace(source) ? 0 : 1) + (fromEditor ? 1 : 0) + (string.IsNullOrWhiteSpace(file) ? 0 : 1);
+            if (given != 1)
+                return (null, "Not executed: pass exactly one of source, from_editor=true or file. For changes of a unit that is already " +
+                              "in the database use edit_object_source (only the changed lines, any unit size).");
+            if (fromEditor)
+            {
+                var c = ctx.EditorContext(out var window);
+                if (ctx.ExcludedWindowMessage(c) is string excluded) return (null, excluded);
+                var text = ctx.Ide.GetEditorText(window);
+                return string.IsNullOrWhiteSpace(text) ? (null, $"Not executed: the {c.WindowName} is empty.") : (text, null);
+            }
+            if (!string.IsNullOrWhiteSpace(file))
+            {
+                if (!ctx.Config.HasWorkspace) return (null, "Not executed: no project folder is configured, so file is not available.");
+                var path = Workspace.Resolve(ctx, file);
+                if (!System.IO.File.Exists(path)) return (null, $"Not executed: file {file} not found in the project folder (list_files, find_object_files).");
+                return (TextFile.Read(path, out _), null);
+            }
+            return (source, null);
         }
 
         public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
         {
-            var source = ReqStr(args, "source");
+            var (source, inputError) = ReadInput(args, ctx);
+            if (inputError != null) return inputError;
             var parts = SplitOnSlash(source);
             if (parts.Count == 0) return "Nothing to compile.";
             foreach (var p in parts)
@@ -830,11 +866,19 @@ namespace PlsqlDevAgent.Agent.Tools
             var sensitive = parts.Select(SensitiveUnitReason).FirstOrDefault(r => r != null);
             if (!ctx.Config.AutoApproveSql || sensitive != null)
             {
+                // units that already exist are shown as a diff against the database: a long unit in full would fill the chat
+                var (diff, current, proposed) = DiffAgainstDatabase(ctx, parts);
+                var title = L.T("Compile into database ({0}): {1}", ctx.Ide.GetContext().ConnectionLabel, SummarizeSource(source));
                 var approval = await ctx.ApproveAsync(new ApprovalRequest
                 {
                     Category = sensitive != null ? "sql-destructive" : "sql",
-                    Title = L.T("Compile into database ({0}): {1}", ctx.Ide.GetContext().ConnectionLabel, Summarize(args)),
-                    Detail = source.Replace("\r\n", "\n"),
+                    Title = title,
+                    Detail = diff == null ? source.Replace("\r\n", "\n") : null,
+                    Diff = diff,
+                    DiffLeftCaption = diff == null ? null : L.T("{0} (database)", SummarizeSource(source)),
+                    DiffLeftText = current,
+                    DiffRightCaption = diff == null ? null : L.T("{0} (proposed)", SummarizeSource(source)),
+                    DiffRightText = proposed,
                     Warning = sensitive != null ? L.T(sensitive) : null,
                     AlwaysAsk = sensitive != null,
                 });
@@ -844,6 +888,45 @@ namespace PlsqlDevAgent.Agent.Tools
             var result = Compile(ctx, parts, "compile", Bool(args, "keep_settings", true));
             return localNote == null ? result : result.TrimEnd() + "\n\n" + localNote;
         }
+
+        /// <summary>
+        /// The change as a unified diff against the source in the database, if every part replaces an existing PL/SQL unit;
+        /// (null, null, null) if one of them is new (or a view): then the approval shows the code itself.
+        /// </summary>
+        private static (string Diff, string Current, string Proposed) DiffAgainstDatabase(ToolContext ctx, List<string> parts)
+        {
+            try
+            {
+                var diff = new StringBuilder();
+                var current = new StringBuilder();
+                var proposed = new StringBuilder();
+                foreach (var part in parts)
+                {
+                    var stmt = PrepareStatement(part);
+                    if (!IsPlsqlUnit(stmt, out var type, out var owner, out var name)) return (null, null, null);
+                    var before = Db.CurrentSource(ctx, type, owner ?? ctx.CurrentSchema, name);
+                    if (before == null) return (null, null, null);
+                    // same line ends and the same CREATE OR REPLACE, so that only real changes show
+                    before = NormalizeForDiff(before);
+                    stmt = NormalizeForDiff(stmt);
+                    var d = LineDiff.Unified(before, stmt);
+                    diff.Append(parts.Count > 1 ? $"-- {type} {name}\n" : "").Append(d.Length == 0 ? "(no change)\n" : d).Append(d.EndsWith("\n") ? "" : "\n");
+                    current.Append(before).Append("\n/\n");
+                    proposed.Append(stmt).Append("\n/\n");
+                }
+                return (diff.ToString(), current.ToString(), proposed.ToString());
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                Log.Warn("Diff against the database for the approval failed: " + ex.Message);
+                return (null, null, null);
+            }
+        }
+
+        private static string NormalizeForDiff(string source) =>
+            Regex.Replace(source.Replace("\r\n", "\n").TrimEnd('\n', ' ', '/'), @"^\s*CREATE\s+(OR\s+REPLACE\s+)?((NON)?EDITIONABLE\s+)?", "CREATE OR REPLACE ",
+                RegexOptions.IgnoreCase) + "\n";
 
         /// <summary>
         /// Executes CREATE OR REPLACE statements (backing up the previous versions, keeping the units' compiler
@@ -901,6 +984,149 @@ namespace PlsqlDevAgent.Agent.Tools
             }
             sb.Append(watch.Report());
             return sb.ToString().TrimEnd();
+        }
+    }
+
+    /// <summary>
+    /// Changes a stored PL/SQL unit by exact replacements and compiles it: the model only sends the changed lines, so the
+    /// size of the unit does not matter (a whole 4,000-line package does not fit into the model's output limit).
+    /// </summary>
+    internal sealed class EditObjectSourceTool : AgentTool
+    {
+        public const string ToolName = "edit_object_source";
+        public override string Name => ToolName;
+        public override string Description =>
+            "Changes a PL/SQL unit that is stored in the database (package, package body, procedure, function, trigger, type, " +
+            "type body) WITHOUT sending its whole source: applies exact text replacements to the source compiled in the " +
+            "database and compiles the result (previous version backed up, compiler settings kept, errors and warnings " +
+            "reported like compile_plsql). This is the way to change existing units, whatever their size – never pass a " +
+            "large unit as a whole to compile_plsql. Each old_string must match the stored source exactly (copy it from " +
+            "get_object_source, without line numbers) and be unique unless replace_all is true; put all edits of one unit " +
+            "into one call. The user approves the diff.";
+        public override JObject Parameters => new JObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JObject
+            {
+                ["name"] = new JObject { ["type"] = "string", ["description"] = "Unit name, optionally OWNER.NAME." },
+                ["object_type"] = new JObject
+                {
+                    ["type"] = "string",
+                    ["description"] = "PACKAGE, PACKAGE BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE or TYPE BODY. Without it, a package or " +
+                                      "type is changed where the edits match (specification or body).",
+                },
+                ["edits"] = new JObject
+                {
+                    ["type"] = "array",
+                    ["description"] = "Replacements, applied in this order.",
+                    ["items"] = new JObject
+                    {
+                        ["type"] = "object",
+                        ["properties"] = new JObject
+                        {
+                            ["old_string"] = new JObject { ["type"] = "string", ["description"] = "Exact text to replace (enough lines to be unique)." },
+                            ["new_string"] = new JObject { ["type"] = "string", ["description"] = "Replacement text." },
+                            ["replace_all"] = new JObject { ["type"] = "boolean", ["description"] = "Replace every occurrence (default false)." },
+                        },
+                        ["required"] = new JArray("old_string", "new_string"),
+                    },
+                },
+                ["keep_settings"] = new JObject { ["type"] = "boolean", ["description"] = "Default true: keep the unit's stored compiler settings." },
+            },
+            ["required"] = new JArray("name", "edits"),
+        };
+        public override bool Mutating => true;
+
+        public override string Summarize(JObject args)
+        {
+            int n = Edits(args).Count;
+            return $"{Str(args, "object_type", "")} {Str(args, "name")}".Trim() + $" ({n} {(n == 1 ? "edit" : "edits")})";
+        }
+
+        /// <summary>The edits; a single edit object or old_string/new_string at the top level are accepted as well.</summary>
+        private static List<JObject> Edits(JObject args)
+        {
+            var e = args?["edits"];
+            if (e is JArray arr) return arr.OfType<JObject>().ToList();
+            if (e is JObject one) return new List<JObject> { one };
+            if (e is JValue v && v.Type == JTokenType.String)
+            {
+                try { if (JToken.Parse((string)v) is JArray parsed) return parsed.OfType<JObject>().ToList(); } catch { }
+            }
+            if (args?["old_string"] != null) return new List<JObject> { args };
+            return new List<JObject>();
+        }
+
+        public override async Task<string> ExecuteAsync(JObject args, ToolContext ctx)
+        {
+            var edits = Edits(args);
+            if (edits.Count == 0) throw new ToolArgumentException("edits is empty: pass at least one {old_string, new_string}.");
+            var type = Str(args, "object_type");
+            // an explicit type wins ("package_body" / "Package Body" → "PACKAGE BODY")
+            type = string.IsNullOrWhiteSpace(type) ? null : Regex.Replace(type.Trim().ToUpperInvariant(), @"[\s_]+", " ");
+            var obj = Db.ResolveOne(ctx, ReqStr(args, "name"), type);
+            var mainType = type ?? obj.Type;
+            if (!new[] { "PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY" }.Contains(mainType))
+                return $"Not executed: {mainType} {obj.Owner}.{obj.Name} is not a PL/SQL unit. Use compile_plsql for views and execute_sql for other objects.";
+
+            // without object_type a package or type is changed where the edits match: specification or body
+            var candidates = new List<string> { mainType };
+            if (string.IsNullOrWhiteSpace(type) && (obj.Type == "PACKAGE" || obj.Type == "TYPE")) candidates.Add(obj.Type + " BODY");
+            string unitType = null, before = null, after = null;
+            ToolArgumentException firstError = null;
+            foreach (var candidate in candidates)
+            {
+                var current = Db.CurrentSource(ctx, candidate, obj.Owner, obj.Name);
+                if (current == null) continue;
+                if (Regex.IsMatch(current, @"^CREATE OR REPLACE\s+[\w ]+?\s+(""[^""]+""|[\w$#]+)(\.(""[^""]+""|[\w$#]+))?\s+wrapped\b", RegexOptions.IgnoreCase))
+                    return $"Not executed: {candidate} {obj.Owner}.{obj.Name} is wrapped (encrypted); its source cannot be changed.";
+                try
+                {
+                    var text = current;
+                    for (int i = 0; i < edits.Count; i++)
+                    {
+                        try { text = TextEdit.Apply(text, (string)edits[i]["old_string"], (string)edits[i]["new_string"], (bool?)edits[i]["replace_all"] ?? false); }
+                        catch (ToolArgumentException ex) { throw new ToolArgumentException($"Edit {i + 1} of {edits.Count} ({candidate} {obj.Owner}.{obj.Name}): {ex.Message}"); }
+                    }
+                    unitType = candidate; before = current; after = text;
+                    break;
+                }
+                catch (ToolArgumentException ex) { if (firstError == null) firstError = ex; }
+            }
+            if (unitType == null)
+            {
+                if (firstError != null)
+                    throw new ToolArgumentException(firstError.Message + " Nothing was changed. Read the exact lines with get_object_source (start_line / end_line" +
+                                                    (candidates.Count > 1 ? $", object_type {obj.Type} or {obj.Type} BODY" : "") + ").");
+                return $"Not executed: no source of {mainType} {obj.Owner}.{obj.Name} is visible.";
+            }
+
+            var (proceed, localNote) = await LocalChanges.CheckAsync(ctx, new[] { (unitType, obj.Owner, obj.Name) });
+            if (!proceed) return localNote;
+
+            var unit = $"{unitType} {obj.Owner}.{obj.Name}";
+            var sensitive = SensitiveUnitReason(after);
+            if (!ctx.Config.AutoApproveSql || sensitive != null)
+            {
+                var approval = await ctx.ApproveAsync(new ApprovalRequest
+                {
+                    Category = sensitive != null ? "sql-destructive" : "sql",
+                    Title = L.T("Change in database ({0}): {1}", ctx.Ide.GetContext().ConnectionLabel, unit),
+                    Diff = LineDiff.Unified(before, after),
+                    DiffLeftCaption = L.T("{0} (database)", unit),
+                    DiffLeftText = before,
+                    DiffRightCaption = L.T("{0} (proposed)", unit),
+                    DiffRightText = after,
+                    Warning = sensitive != null ? L.T(sensitive) : null,
+                    AlwaysAsk = sensitive != null,
+                });
+                if (!approval.Approved) return approval.RejectionMessage;
+            }
+
+            var result = CompilePlsqlTool.Compile(ctx, new List<string> { after }, ToolName, Bool(args, "keep_settings", true));
+            var diff = Db.Truncate(LineDiff.Unified(before, after, 1), 6000);
+            var text2 = $"Applied {edits.Count} edit(s) to {unit}:\n{diff}\n\n{result}";
+            return localNote == null ? text2 : text2.TrimEnd() + "\n\n" + localNote;
         }
     }
 

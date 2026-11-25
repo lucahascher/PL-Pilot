@@ -1255,6 +1255,7 @@ namespace PlsqlDevAgent.UI
 
         private void ApplyIdeSettings()
         {
+            if (_ide is PlsqlIde serial) serial.DisableParallel = _config.DisableParallel; // applied before the agent's next statement
             if (_ide is PlsqlIde p && p.UseSeparateSession != _config.SeparateSession)
             {
                 p.UseSeparateSession = _config.SeparateSession;

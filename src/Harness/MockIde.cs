@@ -20,7 +20,14 @@ namespace PlsqlDevAgent.Harness
         public string IdeLanguage => "";
         public bool CanShowDifferences => false;
 
-        public IdeContext GetContext() => MainThread.Invoke(() => new IdeContext
+        /// <summary>
+        /// A second, simulated window (a SQL window with a file) the harness can activate while a request runs, to check
+        /// that the request keeps working on the window it started with.
+        /// </summary>
+        public string OtherWindowText = "select * from dept;\r\n";
+        public volatile bool OtherWindowActive;
+
+        private IdeContext EditorContext() => new IdeContext
         {
             Connected = true,
             User = "SCOTT",
@@ -34,16 +41,38 @@ namespace PlsqlDevAgent.Harness
             CursorLine = 1,
             CursorColumn = 1,
             Modified = _form.Editor.Modified,
-        });
+            EditorHandle = 1,
+        };
 
-        public string GetEditorText() => MainThread.Invoke(() => _form.Editor.Text);
-        public string GetSelectedText() => MainThread.Invoke(() => _form.Editor.SelectedText);
-
-        public void ReplaceEditorText(string expectedCurrent, string newText) => MainThread.Invoke(() =>
+        private static IdeContext OtherContext() => new IdeContext
         {
-            if (expectedCurrent != null && _form.Editor.Text.Replace("\r\n", "\n").TrimEnd() != expectedCurrent.Replace("\r\n", "\n").TrimEnd())
+            Connected = true, User = "SCOTT", Database = "XEPDB1", IdeVersion = 1700,
+            WindowType = IdeWindowType.Sql, FileName = @"C:\work\other.sql", HasEditor = true, CursorLine = 1, CursorColumn = 1,
+            EditorHandle = 2,
+        };
+
+        /// <summary>Whether <paramref name="window"/> (null: the active window) is the second window.</summary>
+        private bool IsOther(EditorTarget window)
+        {
+            if (window == null) return OtherWindowActive;
+            if (window.Matches(EditorContext())) return false;
+            if (window.Matches(OtherContext())) return true;
+            throw new IdeException($"The {window.Name} is not open any more (it was closed).");
+        }
+
+        public IdeContext GetContext() => MainThread.Invoke(() => OtherWindowActive ? OtherContext() : EditorContext());
+        public IdeContext GetWindowContext(EditorTarget window) => MainThread.Invoke(() => IsOther(window) ? OtherContext() : EditorContext());
+
+        public string GetEditorText(EditorTarget window = null) => MainThread.Invoke(() => IsOther(window) ? OtherWindowText : _form.Editor.Text);
+        public string GetSelectedText(EditorTarget window = null) => MainThread.Invoke(() => IsOther(window) ? "" : _form.Editor.SelectedText);
+
+        public void ReplaceEditorText(string expectedCurrent, string newText, EditorTarget window = null) => MainThread.Invoke(() =>
+        {
+            bool other = IsOther(window);
+            var current = other ? OtherWindowText : _form.Editor.Text;
+            if (expectedCurrent != null && current.Replace("\r\n", "\n").TrimEnd() != expectedCurrent.Replace("\r\n", "\n").TrimEnd())
                 throw new IdeException("The editor content changed since it was read.");
-            _form.Editor.Text = newText;
+            if (other) OtherWindowText = newText; else _form.Editor.Text = newText;
         });
 
         public void NewWindow(IdeWindowType type, string text) =>
@@ -181,7 +210,7 @@ namespace PlsqlDevAgent.Harness
             return r;
         }
 
-        public QueryResult GetResultGrid(int maxRows)
+        public QueryResult GetResultGrid(int maxRows, EditorTarget window = null)
         {
             var r = new QueryResult();
             r.Columns.AddRange(new[] { "DEPTNO", "DNAME" });

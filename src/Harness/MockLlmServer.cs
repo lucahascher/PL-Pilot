@@ -79,6 +79,7 @@ namespace PlsqlDevAgent.Harness
                 if (headerLines.Any(l => l.StartsWith("Expect:", StringComparison.OrdinalIgnoreCase))) Interlocked.Increment(ref ExpectContinueRequests);
                 if (body.Contains("Task: PARALLEL research")) await Task.Delay(1500); // a slow model answer for the helpers
                 if (body.Contains("SLOWAFTERTOOL") && body.Contains("tool_call_id")) await Task.Delay(5000); // time to press Stop after a tool call
+                if (body.Contains("SLOWMODEL")) await Task.Delay(1500); // time to switch windows while the request runs
 
                 await WriteAll(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
                 foreach (var chunk in Script(JObject.Parse(body)))
@@ -148,6 +149,28 @@ namespace PlsqlDevAgent.Harness
             {
                 bool done = messages.OfType<JObject>().Reverse().TakeWhile(m => (string)m["role"] != "user").Any(m => m["tool_calls"] != null);
                 return done ? Final("Done.") : ToolCall("es_" + messages.Count, "execute_sql", new JObject { ["sql"] = exec.Groups[1].Value });
+            }
+
+            // the output limit cuts off a large tool call: as a broken tool call (CUTOFFCALL) or, like DeepSeek's server when it
+            // cannot parse the cut-off call, as template text in the answer (CUTOFFTEXT); the second answer is normal
+            if (role == "user" && request.StartsWith("[Note from PL/Pilot: your output reached the max_tokens limit"))
+                return Final("I will change the package with edit_object_source instead.");
+            if (request.Contains("CUTOFFCALL") || request.Contains("CUTOFFTEXT"))
+            {
+                if (role == "tool") return Final("I will change the package with edit_object_source instead.");
+                var big = "create or replace package body emp_api is\\n" + string.Concat(Enumerable.Repeat("  procedure p is begin null; end;\\n", 300));
+                if (request.Contains("CUTOFFCALL"))
+                    return new[]
+                    {
+                        Delta(new JObject { ["tool_calls"] = new JArray { new JObject { ["index"] = 0, ["id"] = "cut_1", ["type"] = "function",
+                            ["function"] = new JObject { ["name"] = "compile_plsql", ["arguments"] = "{\"source\":\"" + big } } } }),
+                        Delta(new JObject(), "length"),
+                    };
+                return Text("I will compile the package now.").Concat(new[]
+                {
+                    Delta(new JObject { ["content"] = "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>compile_plsql<｜tool▁sep｜>{\"source\":\"" + big }),
+                    Delta(new JObject(), "length"),
+                });
             }
 
             // a small model stuck in a loop, with a leaked template token (gemma: "<channel|>")
